@@ -152,6 +152,11 @@
 				"category": "%configuration.title%"
 			},
 			{
+				"command": "kilo-code.exportDialogHistory",
+				"title": "Export Dialog History",
+				"category": "%configuration.title%"
+			},
+			{
 				"command": "kilo-code.promptsButtonClicked",
 				"title": "%command.prompts.title%",
 				"icon": "$(organization)"

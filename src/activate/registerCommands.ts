@@ -19,6 +19,7 @@ import { t } from "../i18n"
 import { getAppUrl } from "@roo-code/types" // kilocode_change
 import { generateTerminalCommand } from "../utils/terminalCommandGenerator" // kilocode_change
 import { AgentManagerProvider } from "../core/kilocode/agent-manager/AgentManagerProvider" // kilocode_change
+import { exportDialogHistory } from "../kilocode/history/exportDialogHistory" // kilocode_change
 
 /**
  * Helper to get the visible ClineProvider instance or log if not found.
@@ -267,6 +268,28 @@ const getCommandsMap = ({ context, outputChannel }: RegisterCommandOptions): Rec
 			providerSettingsManager: visibleProvider.providerSettingsManager,
 			contextProxy: visibleProvider.contextProxy,
 		})
+	},
+	exportDialogHistory: async () => {
+		const visibleProvider = getVisibleProviderOrLog(outputChannel)
+		if (!visibleProvider) return
+
+		try {
+			const result = await exportDialogHistory(visibleProvider)
+			const message = `Exported ${result.exported} Kilo dialog history file(s), skipped ${result.skipped}, failed ${result.failed.length}. Output: ${result.outputDir}`
+
+			outputChannel.appendLine(message)
+
+			if (result.failed.length > 0) {
+				vscode.window.showWarningMessage(message)
+			} else {
+				vscode.window.showInformationMessage(message)
+			}
+		} catch (error) {
+			const message = `Failed to export Kilo dialog history: ${error instanceof Error ? error.message : String(error)}`
+
+			outputChannel.appendLine(message)
+			vscode.window.showErrorMessage(message)
+		}
 	},
 	// Handle external URI - used by JetBrains plugin to forward auth tokens
 	handleExternalUri: async (uriString: string) => {
