@@ -1,5 +1,21 @@
 # kilo-code
 
+## 5.17.0
+
+### Minor Changes
+
+- [#171](https://github.com/Kilo-Org/kilocode-legacy/pull/171) [`f8fbfbf`](https://github.com/Kilo-Org/kilocode-legacy/commit/f8fbfbf0564058c5e064db635672a1a87f9a70b4) Thanks [@PATAPOsha](https://github.com/PATAPOsha)! - Add support for GPT-5.5 when using the OpenAI API provider.
+
+### Patch Changes
+
+- [#169](https://github.com/Kilo-Org/kilocode-legacy/pull/169) [`3af8630`](https://github.com/Kilo-Org/kilocode-legacy/commit/3af86304f126716c850f42b7b7169fc9d1a6fbe6) Thanks [@lambertjosh](https://github.com/lambertjosh)! - Point legacy IDE help links to the frozen documentation archive.
+
+## 5.16.2
+
+### Patch Changes
+
+- [#163](https://github.com/Kilo-Org/kilocode-legacy/pull/163) [`ad520ce`](https://github.com/Kilo-Org/kilocode-legacy/commit/ad520cee99fe4b82ae4e3fb3c8227589aca02447) Thanks [@lambertjosh](https://github.com/lambertjosh)! - Fix file search and indexing on newer VS Code versions.
+
 ## 5.16.1
 
 ### Patch Changes
