@@ -584,6 +584,7 @@ export type ExtensionState = Pick<
 	currentTaskItem?: HistoryItem
 	currentTaskTodos?: TodoItem[] // Initial todos for the current task
 	currentTaskCumulativeCost?: number // kilocode_change: cumulative cost including deleted messages
+	staleWorkspaceRestore?: { sourceTaskId: string; commitHash: string; acknowledged: boolean }
 	apiConfiguration: ProviderSettings
 	uriScheme?: string
 	uiKind?: string // kilocode_change
@@ -691,6 +692,7 @@ export type ClineAskResponse =
 	| "noButtonClicked"
 	| "messageResponse"
 	| "objectResponse"
+	| "workspace_restore_acknowledged" // kilocode_change: Acknowledge cross-session checkpoint restore staleness.
 	| "retry_clicked" // kilocode_change: Added retry_clicked for payment required dialog
 
 export type AudioType = "notification" | "celebration" | "progress_loop"
@@ -1196,6 +1198,7 @@ export const checkoutDiffPayloadSchema = z.object({
 export type CheckpointDiffPayload = z.infer<typeof checkoutDiffPayloadSchema>
 
 export const checkoutRestorePayloadSchema = z.object({
+	taskId: z.string(),
 	ts: z.number(),
 	commitHash: z.string(),
 	mode: z.enum(["preview", "restore"]),

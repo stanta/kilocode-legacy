@@ -8,6 +8,8 @@ export const sessionRuntimeModeBindingSchema = z.object({
 	mode: z.string(),
 	apiConfigName: z.string().optional(),
 	apiConfiguration: providerSettingsSchema,
+	condensingApiConfigId: z.string().optional(),
+	customCondensingPrompt: z.string().optional(),
 	provider: z.string().optional(),
 	modelId: z.string().optional(),
 	toolProtocol: toolProtocolSchema.optional(),

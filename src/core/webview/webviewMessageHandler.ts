@@ -637,6 +637,16 @@ export const webviewMessageHandler = async (
 
 		case "askResponse":
 			{
+				if (message.askResponse === "workspace_restore_acknowledged") {
+					provider.acknowledgeWorkspaceRestoreStaleness()
+					break
+				}
+				try {
+					provider.ensureWorkspaceRestoreAcknowledged?.()
+				} catch (error) {
+					vscode.window.showErrorMessage(t("common:errors.checkpoint_failed"))
+					break
+				}
 				const resolved = await resolveIncomingImages({ text: message.text, images: message.images })
 				provider
 					.getCurrentTask()
@@ -1483,6 +1493,13 @@ export const webviewMessageHandler = async (
 			const result = checkoutRestorePayloadSchema.safeParse(message.payload)
 
 			if (result.success) {
+				const requestedTaskId = result.data.taskId
+				const currentTask = provider.getCurrentTask()
+				if (!currentTask || currentTask.taskId !== requestedTaskId) {
+					vscode.window.showErrorMessage(t("common:errors.checkpoint_failed"))
+					break
+				}
+
 				await provider.cancelTask()
 
 				try {
@@ -1492,7 +1509,11 @@ export const webviewMessageHandler = async (
 				}
 
 				try {
-					await provider.getCurrentTask()?.checkpointRestore(result.data)
+					const restoredTask = provider.getCurrentTask()
+					if (!restoredTask || restoredTask.taskId !== requestedTaskId) {
+						throw new Error("Checkpoint restore target changed while preparing restore")
+					}
+					await restoredTask.checkpointRestore(result.data)
 				} catch (error) {
 					vscode.window.showErrorMessage(t("common:errors.checkpoint_failed"))
 				}

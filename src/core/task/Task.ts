@@ -354,7 +354,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	// API
 	apiConfiguration: ProviderSettings
 	api: ApiHandler
-	private static lastGlobalApiRequestTime?: number
+	private static readonly scopedApiRequestTimes = new Map<string, number>()
 	private autoApprovalHandler: AutoApprovalHandler
 
 	/**
@@ -362,7 +362,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 * @internal
 	 */
 	static resetGlobalApiRequestTime(): void {
-		Task.lastGlobalApiRequestTime = undefined
+		Task.scopedApiRequestTimes.clear()
 	}
 
 	toolRepetitionDetector: ToolRepetitionDetector
@@ -745,6 +745,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		mode: string
 		apiConfigName?: string
 		apiConfiguration: ProviderSettings
+		condensingApiConfigId?: string
+		customCondensingPrompt?: string
 		toolProtocol?: ToolProtocol
 		source?: SessionRuntimeModeBinding["source"]
 		updatedAt?: number
@@ -754,6 +756,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			mode: args.mode,
 			apiConfigName: args.apiConfigName,
 			apiConfiguration,
+			condensingApiConfigId: args.condensingApiConfigId,
+			customCondensingPrompt: args.customCondensingPrompt,
 			provider: apiConfiguration.apiProvider,
 			modelId: getModelId(apiConfiguration),
 			toolProtocol: args.toolProtocol ?? apiConfiguration.toolProtocol,
@@ -766,6 +770,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		currentMode: string
 		apiConfigName?: string
 		apiConfiguration: ProviderSettings
+		condensingApiConfigId?: string
+		customCondensingPrompt?: string
 		toolProtocol?: ToolProtocol
 		source?: SessionRuntimeConfig["source"]
 		updatedAt?: number
@@ -859,6 +865,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		mode: string
 		apiConfigName?: string
 		apiConfiguration: ProviderSettings
+		condensingApiConfigId?: string
+		customCondensingPrompt?: string
 		toolProtocol?: ToolProtocol
 		source?: SessionRuntimeModeBinding["source"]
 	}): SessionRuntimeConfig {
@@ -883,6 +891,44 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this._taskToolProtocol = toolProtocol
 		this.apiConfiguration = { ...args.apiConfiguration }
 		return this.getSessionRuntimeConfig()
+	}
+
+	private async captureSessionCondensingSettings(): Promise<
+		Pick<SessionRuntimeModeBinding, "condensingApiConfigId" | "customCondensingPrompt">
+	> {
+		const state = await this.providerRef.deref()?.getState()
+		return {
+			condensingApiConfigId: state?.condensingApiConfigId,
+			customCondensingPrompt: state?.customCondensingPrompt,
+		}
+	}
+
+	private async ensureSessionCondensingSettings(): Promise<
+		Pick<SessionRuntimeModeBinding, "condensingApiConfigId" | "customCondensingPrompt">
+	> {
+		const currentBinding = this.getCurrentSessionModeBinding()
+		if (
+			currentBinding?.condensingApiConfigId !== undefined ||
+			currentBinding?.customCondensingPrompt !== undefined
+		) {
+			return {
+				condensingApiConfigId: currentBinding.condensingApiConfigId,
+				customCondensingPrompt: currentBinding.customCondensingPrompt,
+			}
+		}
+
+		const captured = await this.captureSessionCondensingSettings()
+		const currentMode = this._taskMode ?? this.sessionRuntimeConfig.currentMode ?? defaultModeSlug
+		this.setSessionModeBinding({
+			mode: currentMode,
+			apiConfigName: this._taskApiConfigName,
+			apiConfiguration: this.getSessionApiConfiguration(),
+			condensingApiConfigId: captured.condensingApiConfigId,
+			customCondensingPrompt: captured.customCondensingPrompt,
+			toolProtocol: this._taskToolProtocol,
+			source: this.sessionRuntimeConfig.source ?? "fallback",
+		})
+		return captured
 	}
 
 	public switchSessionModeToExistingBinding(mode: string): SessionRuntimeModeBinding | undefined {
@@ -2015,11 +2061,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		const systemPrompt = await this.getSystemPrompt()
 
-		// Get condensing configuration
 		const state = await this.providerRef.deref()?.getState()
-		// These properties may not exist in the state type yet, but are used for condensing configuration
-		const customCondensingPrompt = state?.customCondensingPrompt
-		const condensingApiConfigId = state?.condensingApiConfigId
+		const { customCondensingPrompt, condensingApiConfigId } = await this.ensureSessionCondensingSettings()
 		const listApiConfigMeta = state?.listApiConfigMeta
 
 		// Determine API handler to use
@@ -2953,12 +2996,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// This prevents the UI from showing an "API Request..." spinner while we are
 			// intentionally waiting due to the rate limit slider.
 			//
-			// NOTE: We also set Task.lastGlobalApiRequestTime here to reserve this slot
+			// NOTE: We also reserve the scoped request slot here
 			// before we build environment details (which can take time).
 			// This ensures subsequent requests (including subtasks) still honour the
 			// provider rate-limit window.
 			await this.maybeWaitForProviderRateLimit(currentItem.retryAttempt ?? 0)
-			Task.lastGlobalApiRequestTime = performance.now()
+			this.setScopedApiRequestTime(performance.now())
 
 			await this.say(
 				"api_req_started",
@@ -4451,6 +4494,23 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		)
 	}
 
+	private getProviderRateLimitKey(): string {
+		const binding = this.getCurrentSessionModeBinding()
+		const apiConfiguration = binding?.apiConfiguration ?? this.apiConfiguration
+		const provider = apiConfiguration?.apiProvider ?? "unknown"
+		const profile = binding?.apiConfigName ?? this._taskApiConfigName ?? "default"
+		const modelId = getModelId(apiConfiguration) ?? "default"
+		return `${provider}::${profile}::${modelId}`
+	}
+
+	private getScopedApiRequestTime(): number | undefined {
+		return Task.scopedApiRequestTimes.get(this.getProviderRateLimitKey())
+	}
+
+	private setScopedApiRequestTime(timestamp: number): void {
+		Task.scopedApiRequestTimes.set(this.getProviderRateLimitKey(), timestamp)
+	}
+
 	private async handleContextWindowExceededError(): Promise<void> {
 		const state = await this.providerRef.deref()?.getState()
 		const { profileThresholds = {} } = state ?? {}
@@ -4553,16 +4613,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 * the `api_req_rate_limit_wait` say type (not an error).
 	 */
 	private async maybeWaitForProviderRateLimit(retryAttempt: number): Promise<void> {
-		const state = await this.providerRef.deref()?.getState()
-		const rateLimitSeconds =
-			state?.apiConfiguration?.rateLimitSeconds ?? this.apiConfiguration?.rateLimitSeconds ?? 0
+		const apiConfiguration = this.getSessionApiConfiguration()
+		const rateLimitSeconds = apiConfiguration?.rateLimitSeconds ?? this.apiConfiguration?.rateLimitSeconds ?? 0
+		const lastRequestTime = this.getScopedApiRequestTime()
 
-		if (rateLimitSeconds <= 0 || !Task.lastGlobalApiRequestTime) {
+		if (rateLimitSeconds <= 0 || !lastRequestTime) {
 			return
 		}
 
 		const now = performance.now()
-		const timeSinceLastRequest = now - Task.lastGlobalApiRequestTime
+		const timeSinceLastRequest = now - lastRequestTime
 		const rateLimitDelay = Math.ceil(
 			Math.min(rateLimitSeconds, Math.max(0, rateLimitSeconds * 1000 - timeSinceLastRequest) / 1000),
 		)
@@ -4602,6 +4662,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	): ApiStream {
 		const state = await this.providerRef.deref()?.getState()
 		const apiConfiguration = this.getSessionApiConfiguration()
+		const condensingSettings = await this.ensureSessionCondensingSettings()
 
 		const {
 			autoApprovalEnabled,
@@ -4613,8 +4674,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		const mode = this._taskMode ?? state?.mode ?? defaultModeSlug
 
 		// Get condensing configuration for automatic triggers.
-		const customCondensingPrompt = state?.customCondensingPrompt
-		const condensingApiConfigId = state?.condensingApiConfigId
+		const customCondensingPrompt = condensingSettings.customCondensingPrompt
+		const condensingApiConfigId = condensingSettings.condensingApiConfigId
 		const listApiConfigMeta = state?.listApiConfigMeta
 
 		// Determine API handler to use for condensing.
@@ -4647,7 +4708,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// timestamp earlier to include the environment details build. We still set it
 		// here for direct callers (tests) and for the case where we didn't rate-limit
 		// in the caller.
-		Task.lastGlobalApiRequestTime = performance.now()
+		this.setScopedApiRequestTime(performance.now())
 
 		const systemPrompt = await this.getSystemPrompt()
 		const { contextTokens } = this.getTokenUsage()
@@ -5107,7 +5168,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		// kilocode_change start
 		if (apiConfiguration?.rateLimitAfter) {
-			Task.lastGlobalApiRequestTime = performance.now()
+			this.setScopedApiRequestTime(performance.now())
 		}
 		// kilocode_change end
 	}
@@ -5125,9 +5186,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 			// Respect provider rate limit window
 			let rateLimitDelay = 0
-			const rateLimit = (state?.apiConfiguration ?? this.apiConfiguration)?.rateLimitSeconds || 0
-			if (Task.lastGlobalApiRequestTime && rateLimit > 0) {
-				const elapsed = performance.now() - Task.lastGlobalApiRequestTime
+			const rateLimit = this.getSessionApiConfiguration()?.rateLimitSeconds || 0
+			const lastRequestTime = this.getScopedApiRequestTime()
+			if (lastRequestTime && rateLimit > 0) {
+				const elapsed = performance.now() - lastRequestTime
 				rateLimitDelay = Math.ceil(Math.min(rateLimit, Math.max(0, rateLimit * 1000 - elapsed) / 1000))
 			}
 

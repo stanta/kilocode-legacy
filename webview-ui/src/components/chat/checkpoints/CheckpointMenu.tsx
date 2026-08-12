@@ -12,6 +12,7 @@ type CheckpointMenuBaseProps = {
 	ts: number
 	commitHash: string
 	checkpoint: Checkpoint
+	taskId?: string
 }
 type CheckpointMenuControlledProps = {
 	onOpenChange: (open: boolean) => void
@@ -21,7 +22,7 @@ type CheckpointMenuUncontrolledProps = {
 }
 type CheckpointMenuProps = CheckpointMenuBaseProps & (CheckpointMenuControlledProps | CheckpointMenuUncontrolledProps)
 
-export const CheckpointMenu = ({ ts, commitHash, checkpoint, onOpenChange }: CheckpointMenuProps) => {
+export const CheckpointMenu = ({ ts, commitHash, checkpoint, taskId, onOpenChange }: CheckpointMenuProps) => {
 	const { t } = useTranslation()
 	const [internalRestoreOpen, setInternalRestoreOpen] = useState(false)
 	const [restoreConfirming, setRestoreConfirming] = useState(false)
@@ -74,14 +75,20 @@ export const CheckpointMenu = ({ ts, commitHash, checkpoint, onOpenChange }: Che
 	}, [ts, commitHash])
 
 	const onPreview = useCallback(() => {
-		vscode.postMessage({ type: "checkpointRestore", payload: { ts, commitHash, mode: "preview" } })
+		vscode.postMessage({
+			type: "checkpointRestore",
+			payload: { taskId: taskId ?? "", ts, commitHash, mode: "preview" },
+		})
 		setRestoreOpen(false)
-	}, [ts, commitHash, setRestoreOpen])
+	}, [taskId, ts, commitHash, setRestoreOpen])
 
 	const onRestore = useCallback(() => {
-		vscode.postMessage({ type: "checkpointRestore", payload: { ts, commitHash, mode: "restore" } })
+		vscode.postMessage({
+			type: "checkpointRestore",
+			payload: { taskId: taskId ?? "", ts, commitHash, mode: "restore" },
+		})
 		setRestoreOpen(false)
-	}, [ts, commitHash, setRestoreOpen])
+	}, [taskId, ts, commitHash, setRestoreOpen])
 
 	const handleOpenChange = useCallback(
 		(open: boolean) => {

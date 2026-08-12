@@ -138,6 +138,7 @@ describe("checkpointRestoreHandler", () => {
 
 			// Verify checkpoint restore was called with edit operation
 			expect(mockCline.checkpointRestore).toHaveBeenCalledWith({
+				taskId: "test-task-123",
 				ts: 3,
 				commitHash: "abc123",
 				mode: "restore",

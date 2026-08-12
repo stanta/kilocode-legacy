@@ -55,6 +55,7 @@ export async function handleCheckpointRestoreOperation(config: CheckpointRestore
 
 		// Perform the checkpoint restoration
 		await currentCline.checkpointRestore({
+			taskId: currentCline.taskId,
 			ts: messageTs,
 			commitHash: checkpoint.hash,
 			mode: "restore",

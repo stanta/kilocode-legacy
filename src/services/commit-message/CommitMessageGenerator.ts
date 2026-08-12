@@ -8,16 +8,20 @@ import { TelemetryEventName, type ProviderSettings } from "@roo-code/types"
 
 import { GenerateMessageParams, PromptOptions, ProgressUpdate } from "./types/core"
 
+type ApiConfigurationResolver = () => Promise<ProviderSettings>
+
 /**
  * Pure commit message generation logic without IDE-specific dependencies.
  */
 export class CommitMessageGenerator {
 	private readonly providerSettingsManager: ProviderSettingsManager
+	private readonly resolveApiConfiguration?: ApiConfigurationResolver
 	private previousGitContext: string | null = null
 	private previousCommitMessage: string | null = null
 
-	constructor(providerSettingsManager: ProviderSettingsManager) {
+	constructor(providerSettingsManager: ProviderSettingsManager, resolveApiConfiguration?: ApiConfigurationResolver) {
 		this.providerSettingsManager = providerSettingsManager
+		this.resolveApiConfiguration = resolveApiConfiguration
 	}
 
 	async generateMessage(params: GenerateMessageParams): Promise<string> {
@@ -111,13 +115,20 @@ FINAL REMINDER: Your message MUST be COMPLETELY DIFFERENT from the previous mess
 		onProgress?: (progress: ProgressUpdate) => void,
 	): Promise<string> {
 		const contextProxy = ContextProxy.instance
-		if (!contextProxy.isInitialized) {
+		if (!this.resolveApiConfiguration && !contextProxy.isInitialized) {
 			throw new Error("ContextProxy not initialized. Please try again after the extension has fully loaded.")
 		}
-		const apiConfiguration = contextProxy.getProviderSettings()
-		const commitMessageApiConfigId = contextProxy.getValue("commitMessageApiConfigId")
-		const listApiConfigMeta = contextProxy.getValue("listApiConfigMeta") || []
-		const customSupportPrompts = contextProxy.getValue("customSupportPrompts") || {}
+		const hasInitializedContextProxy = contextProxy?.isInitialized === true
+		const apiConfiguration = this.resolveApiConfiguration
+			? await this.resolveApiConfiguration()
+			: contextProxy.getProviderSettings()
+		const commitMessageApiConfigId = hasInitializedContextProxy
+			? contextProxy.getValue("commitMessageApiConfigId")
+			: undefined
+		const listApiConfigMeta = hasInitializedContextProxy ? contextProxy.getValue("listApiConfigMeta") || [] : []
+		const customSupportPrompts = hasInitializedContextProxy
+			? contextProxy.getValue("customSupportPrompts") || {}
+			: {}
 
 		let configToUse: ProviderSettings = apiConfiguration
 

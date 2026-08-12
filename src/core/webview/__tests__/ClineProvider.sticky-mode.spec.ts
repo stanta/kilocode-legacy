@@ -602,6 +602,54 @@ describe("ClineProvider - Sticky Mode", () => {
 			// Verify mode was not changed (should use current mode)
 			expect(handleModeSwitchSpy).not.toHaveBeenCalled()
 		})
+
+		it("keeps provider runtime isolated across multiple provider instances", async () => {
+			await provider.resolveWebviewView(mockWebviewView)
+			vi.spyOn(provider, "activateProviderProfile").mockImplementation(async (args: any) => {
+				;(provider as any).setRuntimeProviderProfile(
+					args.name,
+					args.providerSettings ?? { apiProvider: "anthropic" },
+				)
+			})
+
+			const secondContext = {
+				...mockContext,
+				globalState: mockContext.globalState,
+				secrets: mockContext.secrets,
+			} as unknown as vscode.ExtensionContext
+			const secondProvider = new ClineProvider(
+				secondContext,
+				mockOutputChannel,
+				"sidebar",
+				new ContextProxy(secondContext),
+			)
+			secondProvider.getMcpHub = vi.fn().mockReturnValue({
+				listTools: vi.fn().mockResolvedValue([]),
+				callTool: vi.fn().mockResolvedValue({ content: [] }),
+				listResources: vi.fn().mockResolvedValue([]),
+				readResource: vi.fn().mockResolvedValue({ contents: [] }),
+				getAllServers: vi.fn().mockReturnValue([]),
+			})
+			await secondProvider.resolveWebviewView(mockWebviewView)
+			vi.spyOn(secondProvider, "activateProviderProfile").mockImplementation(async (args: any) => {
+				;(secondProvider as any).setRuntimeProviderProfile(
+					args.name,
+					args.providerSettings ?? { apiProvider: "openrouter" },
+				)
+			})
+
+			await provider.activateProviderProfile({
+				name: "profile-a",
+				providerSettings: { apiProvider: "anthropic", apiKey: "a" } as any,
+			} as any)
+			await secondProvider.activateProviderProfile({
+				name: "profile-b",
+				providerSettings: { apiProvider: "openrouter", apiKey: "b" } as any,
+			} as any)
+
+			expect((await provider.getState()).currentApiConfigName).toBe("profile-a")
+			expect((await secondProvider.getState()).currentApiConfigName).toBe("profile-b")
+		})
 	})
 
 	describe("Task metadata persistence", () => {

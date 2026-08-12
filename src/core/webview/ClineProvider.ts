@@ -74,6 +74,7 @@ import { McpHub } from "../../services/mcp/McpHub"
 import { McpServerManager } from "../../services/mcp/McpServerManager"
 import { MarketplaceManager } from "../../services/marketplace"
 import { ShadowCheckpointService } from "../../services/checkpoints/ShadowCheckpointService"
+import { WorkspaceCheckpointCoordinator } from "../../services/checkpoints"
 import { CodeIndexManager } from "../../services/code-index/manager"
 import type { IndexProgressUpdate } from "../../services/code-index/interfaces/manager"
 import { MdmService } from "../../services/mdm/MdmService"
@@ -185,6 +186,8 @@ export class ClineProvider
 	private static readonly PENDING_OPERATION_TIMEOUT_MS = 30000 // 30 seconds
 	// kilocode_change start: each provider/window owns its active chat runtime selection
 	private runtimeProviderProfile?: RuntimeProviderProfileSnapshot
+	private workspaceRestoreUnsubscribe?: () => void
+	private staleWorkspaceRestore?: { sourceTaskId: string; commitHash: string; acknowledged: boolean }
 	// kilocode_change end
 
 	private cloudOrganizationsCache: CloudOrganizationMembership[] | null = null
@@ -208,6 +211,7 @@ export class ClineProvider
 		this.currentWorkspacePath = getWorkspacePath()
 
 		ClineProvider.activeInstances.add(this)
+		this.subscribeToWorkspaceRestoreEvents()
 
 		this.mdmService = mdmService
 		this.updateGlobalState("codebaseIndexModels", EMBEDDING_MODEL_PROFILES)
@@ -997,6 +1001,8 @@ export class ClineProvider
 		// kilocode_change end
 
 		this.log("Disposed all disposables")
+		this.workspaceRestoreUnsubscribe?.()
+		this.workspaceRestoreUnsubscribe = undefined
 		ClineProvider.activeInstances.delete(this)
 
 		// Clean up any event listeners attached to this provider
@@ -1007,6 +1013,46 @@ export class ClineProvider
 
 	public static getVisibleInstance(): ClineProvider | undefined {
 		return findLast(Array.from(this.activeInstances), (instance) => instance.view?.visible === true)
+	}
+
+	private subscribeToWorkspaceRestoreEvents(): void {
+		this.workspaceRestoreUnsubscribe?.()
+		const workspacePath = this.currentWorkspacePath
+		if (!workspacePath) {
+			return
+		}
+
+		this.workspaceRestoreUnsubscribe = WorkspaceCheckpointCoordinator.subscribe(workspacePath, (event) => {
+			const currentTask = this.getCurrentTask()
+			if (!currentTask || currentTask.taskId === event.sourceTaskId) {
+				return
+			}
+
+			this.staleWorkspaceRestore = {
+				sourceTaskId: event.sourceTaskId,
+				commitHash: event.commitHash,
+				acknowledged: false,
+			}
+			void this.postStateToWebview()
+		})
+	}
+
+	public acknowledgeWorkspaceRestoreStaleness(): void {
+		if (!this.staleWorkspaceRestore) {
+			return
+		}
+
+		this.staleWorkspaceRestore = {
+			...this.staleWorkspaceRestore,
+			acknowledged: true,
+		}
+		void this.postStateToWebview()
+	}
+
+	public ensureWorkspaceRestoreAcknowledged(): void {
+		if (this.staleWorkspaceRestore && !this.staleWorkspaceRestore.acknowledged) {
+			throw new Error("Workspace restore requires acknowledgement before continuing")
+		}
 	}
 
 	public static async getInstance(): Promise<ClineProvider | undefined> {
@@ -2389,6 +2435,7 @@ export class ClineProvider
 
 	async refreshWorkspace() {
 		this.currentWorkspacePath = getWorkspacePath()
+		this.subscribeToWorkspaceRestoreEvents()
 
 		await kilo_execIfExtension(() => {
 			if (this.currentWorkspacePath) {
@@ -2744,6 +2791,7 @@ export class ClineProvider
 			clineMessages: this.getCurrentTask()?.clineMessages || [],
 			currentTaskTodos: this.getCurrentTask()?.todoList || [],
 			currentTaskCumulativeCost: this.getCurrentTask()?.getCumulativeTotalCost(), // kilocode_change
+			staleWorkspaceRestore: this.staleWorkspaceRestore,
 			messageQueue: this.getCurrentTask()?.messageQueueService?.messages,
 			taskHistoryFullLength: taskHistory.length, // kilocode_change
 			taskHistoryVersion: this.kiloCodeTaskHistoryVersion, // kilocode_change
@@ -3648,6 +3696,8 @@ export class ClineProvider
 	}
 
 	public async cancelTask(): Promise<void> {
+		this.ensureWorkspaceRestoreAcknowledged()
+
 		const task = this.getCurrentTask()
 
 		if (!task) {

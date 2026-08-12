@@ -581,6 +581,9 @@ ${errorDetails ? `\nTechnical details:\n${errorDetails}\n` : ""}
 				// Check if preventFocusDisruption experiment is enabled
 				const provider = cline.providerRef.deref()
 				const state = await provider?.getState()
+				const apiConfiguration = provider
+					? await provider.getEffectiveApiConfiguration(cline.taskId)
+					: undefined
 				const diagnosticsEnabled = state?.diagnosticsEnabled ?? true
 				const writeDelayMs = state?.writeDelayMs ?? DEFAULT_WRITE_DELAY_MS
 				const isPreventFocusDisruptionEnabled = experiments.isEnabled(
@@ -647,8 +650,8 @@ ${errorDetails ? `\nTechnical details:\n${errorDetails}\n` : ""}
 						newContent: originalContent!,
 						status: didApprove ? "accepted" : "rejected",
 						taskId: cline.taskId,
-						organizationId: state?.apiConfiguration?.kilocodeOrganizationId,
-						kilocodeToken: state?.apiConfiguration?.kilocodeToken || "",
+						organizationId: apiConfiguration?.kilocodeOrganizationId,
+						kilocodeToken: apiConfiguration?.kilocodeToken || "",
 					})
 					// kilocode_change end
 
@@ -686,8 +689,8 @@ ${errorDetails ? `\nTechnical details:\n${errorDetails}\n` : ""}
 						newContent: originalContent!,
 						status: "accepted", // Batch operations are already approved at this point
 						taskId: cline.taskId,
-						organizationId: state?.apiConfiguration?.kilocodeOrganizationId,
-						kilocodeToken: state?.apiConfiguration?.kilocodeToken || "",
+						organizationId: apiConfiguration?.kilocodeOrganizationId,
+						kilocodeToken: apiConfiguration?.kilocodeToken || "",
 					})
 					// kilocode_change end
 
