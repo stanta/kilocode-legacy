@@ -1,7 +1,7 @@
 import NodeCache from "node-cache"
 import getFolderSize from "get-folder-size"
 
-import type { ClineMessage, HistoryItem, ToolProtocol } from "@roo-code/types"
+import type { ClineMessage, HistoryItem, SessionRuntimeConfig, ToolProtocol } from "@roo-code/types"
 
 import { combineApiRequests } from "../../shared/combineApiRequests"
 import { combineCommandSequences } from "../../shared/combineCommandSequences"
@@ -30,6 +30,7 @@ export type TaskMetadataOptions = {
 	 * continue using this protocol even if user settings change.
 	 */
 	toolProtocol?: ToolProtocol
+	sessionRuntimeConfig?: SessionRuntimeConfig // kilocode_change: session-local mode/profile/model bindings
 	// kilocode_change start
 	/**
 	 * cumulative total cost including deleted messages.
@@ -51,6 +52,7 @@ export async function taskMetadata({
 	apiConfigName,
 	initialStatus,
 	toolProtocol,
+	sessionRuntimeConfig,
 	cumulativeTotalCost, // kilocode_change
 }: TaskMetadataOptions) {
 	const taskDir = await getTaskDirectoryPath(globalStoragePath, id)
@@ -128,6 +130,7 @@ export async function taskMetadata({
 		mode,
 		...(toolProtocol && { toolProtocol }),
 		...(typeof apiConfigName === "string" && apiConfigName.length > 0 ? { apiConfigName } : {}),
+		...(sessionRuntimeConfig && { sessionRuntimeConfig }), // kilocode_change
 		...(initialStatus && { status: initialStatus }),
 	}
 

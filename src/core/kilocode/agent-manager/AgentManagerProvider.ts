@@ -734,7 +734,7 @@ export class AgentManagerProvider implements vscode.Disposable {
 	}
 
 	private async getApiConfigurationForCli(): Promise<ProviderSettings | undefined> {
-		const { apiConfiguration } = await this.provider.getState()
+		const apiConfiguration = await this.provider.getEffectiveApiConfiguration()
 		// Log API configuration details for debugging
 		const hasKilocodeToken = !!apiConfiguration?.kilocodeToken
 		const apiProvider = apiConfiguration?.apiProvider || "none"
@@ -1664,9 +1664,8 @@ export class AgentManagerProvider implements vscode.Disposable {
 		this.fetchingModels = true
 
 		try {
-			// Get API configuration from the extension
-			const state = await this.provider.getState()
-			const { apiConfiguration } = state
+			// Get API configuration from the current session/window runtime.
+			const apiConfiguration = await this.provider.getEffectiveApiConfiguration()
 
 			// Determine the provider - default to "kilocode" if not set
 			const providerName = apiConfiguration.apiProvider || "kilocode"

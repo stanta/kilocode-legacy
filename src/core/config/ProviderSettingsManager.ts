@@ -638,6 +638,17 @@ export class ProviderSettingsManager {
 		}
 	}
 
+	// kilocode_change start: runtime profile resolution without mutating global active defaults
+	/**
+	 * Resolve a profile by name or ID without changing the persisted default active profile.
+	 */
+	public async resolveProfile(
+		params: { name: string } | { id: string },
+	): Promise<ProviderSettingsWithId & { name: string }> {
+		return this.getProfile(params)
+	}
+	// kilocode_change end
+
 	/**
 	 * Delete a config by name.
 	 */

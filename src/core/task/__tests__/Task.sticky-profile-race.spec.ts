@@ -107,16 +107,16 @@ describe("Task - sticky provider profile init race", () => {
 			apiKey: "test-api-key",
 		} as any
 
-		let resolveGetState: ((v: any) => void) | undefined
-		const getStatePromise = new Promise((resolve) => {
-			resolveGetState = resolve
-		})
-
 		const mockProvider = {
 			context: {
 				globalStorageUri: { fsPath: "/test/storage" },
 			},
-			getState: vi.fn().mockImplementation(() => getStatePromise),
+			getState: vi.fn().mockResolvedValue({ currentApiConfigName: "old-profile" }),
+			getRuntimeProviderProfile: vi.fn().mockReturnValue({
+				currentMode: "code",
+				currentApiConfigName: "old-profile",
+				apiConfiguration: apiConfig,
+			}),
 			log: vi.fn(),
 			on: vi.fn(),
 			off: vi.fn(),
@@ -132,12 +132,280 @@ describe("Task - sticky provider profile init race", () => {
 			startTask: false,
 		})
 
-		// Simulate a profile switch happening before provider.getState resolves.
+		// Simulate a profile switch happening after task creation.
 		task.setTaskApiConfigName("new-profile")
 
-		resolveGetState?.({ currentApiConfigName: "old-profile" })
 		await task.waitForApiConfigInitialization()
 
 		expect(task.taskApiConfigName).toBe("new-profile")
+		expect(task.getCurrentSessionModeBinding()).toMatchObject({
+			mode: "code",
+			apiConfigName: "new-profile",
+			apiConfiguration: apiConfig,
+		})
+	})
+
+	it("seeds new sessions from runtime defaults once and then detaches from later provider defaults", async () => {
+		const initialConfig: ProviderSettings = {
+			apiProvider: "anthropic",
+			apiModelId: "claude-session",
+			reasoningEffort: "medium",
+		} as any
+		const laterConfig: ProviderSettings = {
+			apiProvider: "openrouter",
+			openRouterModelId: "openai/global-later",
+			reasoningEffort: "high",
+		} as any
+
+		const runtimeProfile = {
+			currentMode: "code",
+			currentApiConfigName: "session-profile",
+			apiConfiguration: initialConfig,
+		}
+		const mockProvider = {
+			context: {
+				globalStorageUri: { fsPath: "/test/storage" },
+			},
+			getState: vi.fn().mockResolvedValue({
+				mode: "architect",
+				currentApiConfigName: "global-later",
+			}),
+			getRuntimeProviderProfile: vi.fn(() => runtimeProfile),
+			log: vi.fn(),
+			on: vi.fn(),
+			off: vi.fn(),
+			postStateToWebview: vi.fn().mockResolvedValue(undefined),
+			updateTaskHistory: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ClineProvider
+
+		const task = new Task({
+			context: mockProvider.context as any,
+			provider: mockProvider,
+			apiConfiguration: initialConfig,
+			task: "test task",
+			startTask: false,
+		})
+
+		runtimeProfile.currentMode = "architect"
+		runtimeProfile.currentApiConfigName = "global-later"
+		runtimeProfile.apiConfiguration = laterConfig
+
+		expect(await task.getTaskMode()).toBe("code")
+		expect(task.taskApiConfigName).toBe("session-profile")
+		expect(task.getSessionApiConfiguration()).toMatchObject({
+			apiProvider: "anthropic",
+			apiModelId: "claude-session",
+			reasoningEffort: "medium",
+		})
+		expect(mockProvider.getState).not.toHaveBeenCalled()
+	})
+
+	it("keeps same role slug isolated with different model and reasoning settings per session", async () => {
+		const configA: ProviderSettings = {
+			apiProvider: "anthropic",
+			apiModelId: "claude-a",
+			reasoningEffort: "low",
+		} as any
+		const configB: ProviderSettings = {
+			apiProvider: "openrouter",
+			openRouterModelId: "openai/gpt-b",
+			reasoningEffort: "high",
+		} as any
+
+		const createProvider = (apiConfiguration: ProviderSettings, currentApiConfigName: string) =>
+			({
+				context: {
+					globalStorageUri: { fsPath: "/test/storage" },
+				},
+				getState: vi.fn().mockResolvedValue({ mode: "code", currentApiConfigName }),
+				getRuntimeProviderProfile: vi.fn().mockReturnValue({
+					currentMode: "code",
+					currentApiConfigName,
+					apiConfiguration,
+				}),
+				log: vi.fn(),
+				on: vi.fn(),
+				off: vi.fn(),
+				postStateToWebview: vi.fn().mockResolvedValue(undefined),
+				updateTaskHistory: vi.fn().mockResolvedValue(undefined),
+			}) as unknown as ClineProvider
+
+		const taskA = new Task({
+			context: { globalStorageUri: { fsPath: "/test/storage" } } as any,
+			provider: createProvider(configA, "profile-a"),
+			apiConfiguration: configA,
+			task: "session A",
+			startTask: false,
+		})
+		const taskB = new Task({
+			context: { globalStorageUri: { fsPath: "/test/storage" } } as any,
+			provider: createProvider(configB, "profile-b"),
+			apiConfiguration: configB,
+			task: "session B",
+			startTask: false,
+		})
+
+		expect(taskA.getSessionRuntimeConfig().modeBindings?.code).toMatchObject({
+			mode: "code",
+			apiConfigName: "profile-a",
+			modelId: "claude-a",
+			apiConfiguration: expect.objectContaining({ reasoningEffort: "low" }),
+		})
+		expect(taskB.getSessionRuntimeConfig().modeBindings?.code).toMatchObject({
+			mode: "code",
+			apiConfigName: "profile-b",
+			modelId: "openai/gpt-b",
+			apiConfiguration: expect.objectContaining({ reasoningEffort: "high" }),
+		})
+	})
+
+	it("restores versioned history runtime without reading global provider defaults", async () => {
+		const historyConfig: ProviderSettings = {
+			apiProvider: "openrouter",
+			openRouterModelId: "openai/gpt-4.1",
+			reasoningEffort: "high",
+			toolProtocol: "native",
+		} as any
+		const globalConfig: ProviderSettings = {
+			apiProvider: "anthropic",
+			apiModelId: "claude-global",
+			apiKey: "global-key",
+		} as any
+
+		const mockProvider = {
+			context: {
+				globalStorageUri: { fsPath: "/test/storage" },
+			},
+			getState: vi.fn().mockResolvedValue({
+				mode: "code",
+				currentApiConfigName: "global-profile",
+			}),
+			getRuntimeProviderProfile: vi.fn().mockReturnValue({
+				currentMode: "code",
+				currentApiConfigName: "global-profile",
+				apiConfiguration: globalConfig,
+			}),
+			log: vi.fn(),
+			on: vi.fn(),
+			off: vi.fn(),
+			postStateToWebview: vi.fn().mockResolvedValue(undefined),
+			updateTaskHistory: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ClineProvider
+
+		const task = new Task({
+			context: mockProvider.context as any,
+			provider: mockProvider,
+			apiConfiguration: globalConfig,
+			historyItem: {
+				id: "history-session",
+				number: 1,
+				ts: Date.now(),
+				task: "historical task",
+				tokensIn: 0,
+				tokensOut: 0,
+				cacheWrites: 0,
+				cacheReads: 0,
+				totalCost: 0,
+				mode: "code",
+				apiConfigName: "legacy-profile",
+				sessionRuntimeConfig: {
+					version: 1,
+					taskId: "history-session",
+					currentMode: "architect",
+					activeApiConfigName: "session-profile",
+					activeProvider: "openrouter",
+					activeModelId: "openai/gpt-4.1",
+					toolProtocol: "native",
+					updatedAt: Date.now(),
+					modeBindings: {
+						architect: {
+							mode: "architect",
+							apiConfigName: "session-profile",
+							apiConfiguration: historyConfig,
+							provider: "openrouter",
+							modelId: "openai/gpt-4.1",
+							toolProtocol: "native",
+							updatedAt: Date.now(),
+						},
+					},
+				},
+			},
+			startTask: false,
+		})
+
+		expect(await task.getTaskMode()).toBe("architect")
+		expect(task.taskApiConfigName).toBe("session-profile")
+		expect(task.getSessionApiConfiguration()).toMatchObject({
+			apiProvider: "openrouter",
+			openRouterModelId: "openai/gpt-4.1",
+			reasoningEffort: "high",
+			toolProtocol: "native",
+		})
+		expect(mockProvider.getState).not.toHaveBeenCalled()
+	})
+
+	it("lazy-migrates legacy history to a session runtime snapshot", async () => {
+		const legacyConfig: ProviderSettings = {
+			apiProvider: "openrouter",
+			openRouterModelId: "legacy/model",
+			toolProtocol: "native",
+		} as any
+
+		const mockProvider = {
+			context: {
+				globalStorageUri: { fsPath: "/test/storage" },
+			},
+			getState: vi.fn().mockResolvedValue({
+				mode: "code",
+				currentApiConfigName: "global-profile",
+			}),
+			getRuntimeProviderProfile: vi.fn().mockReturnValue({
+				currentMode: "code",
+				currentApiConfigName: "global-profile",
+				apiConfiguration: legacyConfig,
+			}),
+			log: vi.fn(),
+			on: vi.fn(),
+			off: vi.fn(),
+			postStateToWebview: vi.fn().mockResolvedValue(undefined),
+			updateTaskHistory: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ClineProvider
+
+		const task = new Task({
+			context: mockProvider.context as any,
+			provider: mockProvider,
+			apiConfiguration: legacyConfig,
+			historyItem: {
+				id: "legacy-session",
+				number: 1,
+				ts: Date.now(),
+				task: "legacy task",
+				tokensIn: 0,
+				tokensOut: 0,
+				cacheWrites: 0,
+				cacheReads: 0,
+				totalCost: 0,
+				mode: "debug",
+				apiConfigName: "legacy-profile",
+				toolProtocol: "native",
+			},
+			startTask: false,
+		})
+
+		const runtime = task.getSessionRuntimeConfig()
+		expect(runtime).toMatchObject({
+			version: 1,
+			taskId: "legacy-session",
+			currentMode: "debug",
+			activeApiConfigName: "legacy-profile",
+			toolProtocol: "native",
+			source: "legacy-history",
+		})
+		expect(runtime.modeBindings?.debug).toMatchObject({
+			mode: "debug",
+			apiConfigName: "legacy-profile",
+			apiConfiguration: legacyConfig,
+			toolProtocol: "native",
+		})
 	})
 })

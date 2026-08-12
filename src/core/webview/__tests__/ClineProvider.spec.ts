@@ -926,6 +926,7 @@ describe("ClineProvider", () => {
 			getModeConfigId: vi.fn().mockResolvedValue("test-id"),
 			listConfig: vi.fn().mockResolvedValue([profile]),
 			activateProfile: vi.fn().mockResolvedValue(profile),
+			resolveProfile: vi.fn().mockResolvedValue(profile),
 			setModeConfig: vi.fn(),
 			getProfile: vi.fn().mockResolvedValue(profile),
 		} as any
@@ -933,10 +934,11 @@ describe("ClineProvider", () => {
 		// Switch to architect mode
 		await messageHandler({ type: "mode", text: "architect" })
 
-		// Should load the saved config for architect mode
+		// Should load the saved config for architect mode into session runtime only
 		expect(provider.providerSettingsManager.getModeConfigId).toHaveBeenCalledWith("architect")
-		expect(provider.providerSettingsManager.activateProfile).toHaveBeenCalledWith({ name: "test-config" })
-		expect(mockContext.globalState.update).toHaveBeenCalledWith("currentApiConfigName", "test-config")
+		expect(provider.providerSettingsManager.resolveProfile).toHaveBeenCalledWith({ name: "test-config" })
+		expect(provider.providerSettingsManager.activateProfile).not.toHaveBeenCalled()
+		expect(mockContext.globalState.update).not.toHaveBeenCalledWith("currentApiConfigName", "test-config")
 	})
 
 	it("saves current config when switching to mode without config", async () => {
@@ -956,8 +958,9 @@ describe("ClineProvider", () => {
 		// Switch to architect mode
 		await messageHandler({ type: "mode", text: "architect" })
 
-		// Should save current config as default for architect mode
-		expect(provider.providerSettingsManager.setModeConfig).toHaveBeenCalledWith("architect", "current-id")
+		// Session-local mode switches do not mutate global mode profile defaults
+		expect(provider.providerSettingsManager.setModeConfig).not.toHaveBeenCalled()
+		expect((await provider.getState()).mode).toBe("architect")
 	})
 
 	it("saves config as default for current mode when loading config", async () => {
@@ -968,6 +971,7 @@ describe("ClineProvider", () => {
 
 		;(provider as any).providerSettingsManager = {
 			activateProfile: vi.fn().mockResolvedValue(profile),
+			resolveProfile: vi.fn().mockResolvedValue(profile),
 			listConfig: vi.fn().mockResolvedValue([profile]),
 			setModeConfig: vi.fn(),
 			getModeConfigId: vi.fn().mockResolvedValue(undefined),
@@ -979,8 +983,9 @@ describe("ClineProvider", () => {
 		// Then load the config
 		await messageHandler({ type: "loadApiConfiguration", text: "new-config" })
 
-		// Should save new config as default for architect mode
-		expect(provider.providerSettingsManager.setModeConfig).toHaveBeenCalledWith("architect", "new-id")
+		// Loading a profile in chat updates only the session binding, not global mode defaults
+		expect(provider.providerSettingsManager.setModeConfig).not.toHaveBeenCalled()
+		expect(await provider.getProviderProfile()).toBe("new-config")
 	})
 
 	it("load API configuration by ID works and updates mode config", async () => {
@@ -1006,11 +1011,11 @@ describe("ClineProvider", () => {
 		// Then load the config by ID
 		await messageHandler({ type: "loadApiConfigurationById", text: "config-id-123" })
 
-		// Should save new config as default for architect mode
-		expect(provider.providerSettingsManager.setModeConfig).toHaveBeenCalledWith("architect", "config-id-123")
+		// Loading a profile by ID in chat updates only the session binding, not global mode defaults
+		expect(provider.providerSettingsManager.setModeConfig).not.toHaveBeenCalled()
 
-		// Ensure the `activateProfile` method was called with the correct ID
-		expect(provider.providerSettingsManager.activateProfile).toHaveBeenCalledWith({ id: "config-id-123" })
+		// Session-local activation uses non-mutating profile resolution by default
+		expect(provider.providerSettingsManager.activateProfile).not.toHaveBeenCalled()
 	})
 
 	test("handles browserToolEnabled setting", async () => {
@@ -1657,6 +1662,7 @@ describe("ClineProvider", () => {
 				getModeConfigId: vi.fn().mockResolvedValue("saved-config-id"),
 				listConfig: vi.fn().mockResolvedValue([profile]),
 				activateProfile: vi.fn().mockResolvedValue(profile),
+				resolveProfile: vi.fn().mockResolvedValue(profile),
 				setModeConfig: vi.fn(),
 				getProfile: vi.fn().mockResolvedValue(profile),
 			} as any
@@ -1664,13 +1670,15 @@ describe("ClineProvider", () => {
 			// Switch to architect mode
 			await provider.handleModeSwitch("architect")
 
-			// Verify mode was updated
-			expect(mockContext.globalState.update).toHaveBeenCalledWith("mode", "architect")
+			// Verify mode was updated in the provider/window runtime, not global state
+			expect((await provider.getState()).mode).toBe("architect")
+			expect(mockContext.globalState.update).not.toHaveBeenCalledWith("mode", "architect")
 
-			// Verify saved config was loaded
+			// Verify saved config was loaded without global profile activation
 			expect(provider.providerSettingsManager.getModeConfigId).toHaveBeenCalledWith("architect")
-			expect(provider.providerSettingsManager.activateProfile).toHaveBeenCalledWith({ name: "saved-config" })
-			expect(mockContext.globalState.update).toHaveBeenCalledWith("currentApiConfigName", "saved-config")
+			expect(provider.providerSettingsManager.resolveProfile).toHaveBeenCalledWith({ name: "saved-config" })
+			expect(provider.providerSettingsManager.activateProfile).not.toHaveBeenCalled()
+			expect(mockContext.globalState.update).not.toHaveBeenCalledWith("currentApiConfigName", "saved-config")
 
 			// Verify state was posted to webview
 			expect(mockPostMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "state" }))
@@ -1696,11 +1704,12 @@ describe("ClineProvider", () => {
 			// Switch to architect mode
 			await provider.handleModeSwitch("architect")
 
-			// Verify mode was updated
-			expect(mockContext.globalState.update).toHaveBeenCalledWith("mode", "architect")
+			// Verify mode was updated in session/runtime state, not global state
+			expect((await provider.getState()).mode).toBe("architect")
+			expect(mockContext.globalState.update).not.toHaveBeenCalledWith("mode", "architect")
 
-			// Verify current config was saved as default for new mode
-			expect(provider.providerSettingsManager.setModeConfig).toHaveBeenCalledWith("architect", "current-id")
+			// Verify current config was not saved as a global default for new mode
+			expect(provider.providerSettingsManager.setModeConfig).not.toHaveBeenCalled()
 
 			// Verify state was posted to webview
 			expect(mockPostMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "state" }))
@@ -1798,8 +1807,9 @@ describe("ClineProvider", () => {
 			expect(mockCustomModesManager.getCustomModes).toHaveBeenCalled()
 			expect(getModeBySlug).toHaveBeenCalledWith("non-existent-mode", expect.any(Array))
 
-			// Verify fallback to default mode
-			expect(mockContext.globalState.update).toHaveBeenCalledWith("mode", "code")
+			// Verify fallback to default mode in session/runtime state only
+			expect((await provider.getState()).mode).toBe("code")
+			expect(mockContext.globalState.update).not.toHaveBeenCalledWith("mode", "code")
 			expect(logSpy).toHaveBeenCalledWith(
 				"Mode 'non-existent-mode' from history no longer exists. Falling back to default mode 'code'.",
 			)
@@ -1867,8 +1877,9 @@ describe("ClineProvider", () => {
 			expect(mockCustomModesManager.getCustomModes).toHaveBeenCalled()
 			expect(getModeBySlug).toHaveBeenCalledWith("custom-mode", expect.any(Array))
 
-			// Verify mode was preserved
-			expect(mockContext.globalState.update).toHaveBeenCalledWith("mode", "custom-mode")
+			// Verify mode was preserved in session/runtime state only
+			expect((await provider.getState()).mode).toBe("custom-mode")
+			expect(mockContext.globalState.update).not.toHaveBeenCalledWith("mode", "custom-mode")
 			expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining("no longer exists"))
 
 			// Verify history item mode was not changed
@@ -1915,8 +1926,9 @@ describe("ClineProvider", () => {
 			// Initialize with history item
 			await provider.createTaskWithHistoryItem(historyItem)
 
-			// Verify mode was preserved
-			expect(mockContext.globalState.update).toHaveBeenCalledWith("mode", "architect")
+			// Verify mode was preserved in session/runtime state only
+			expect((await provider.getState()).mode).toBe("architect")
+			expect(mockContext.globalState.update).not.toHaveBeenCalledWith("mode", "architect")
 
 			// Verify history item mode was not changed
 			expect(historyItem.mode).toBe("architect")

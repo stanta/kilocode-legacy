@@ -32,6 +32,8 @@ import {
 	type ClineAsk,
 	type ToolProgressStatus,
 	type HistoryItem,
+	type SessionRuntimeConfig,
+	type SessionRuntimeModeBinding,
 	type CreateTaskOptions,
 	type ModelInfo,
 	type ToolProtocol,
@@ -216,6 +218,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	readonly parentTask: Task | undefined
 	readonly taskNumber: number
 	readonly workspacePath: string
+
+	// kilocode_change start: task-owned session runtime snapshot
+	private sessionRuntimeConfig: SessionRuntimeConfig
+	// kilocode_change end
 
 	/**
 	 * The mode associated with this task. Persisted across sessions
@@ -457,8 +463,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	didToolFailInCurrentTurn = false
 	didCompleteReadingStream = false
 	assistantMessageParser?: AssistantMessageParser
-	private providerProfileChangeListener?: (config: { name: string; provider?: string }) => void
-
 	// Native tool call streaming state (track which index each tool is at)
 	private streamingToolCallIndices: Map<string, number> = new Map()
 
@@ -557,7 +561,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			console.error("Failed to initialize RooIgnoreController:", error)
 		})
 
-		this.apiConfiguration = apiConfiguration
+		this.apiConfiguration = { ...apiConfiguration }
 		this.api = buildApiHandler(this.apiConfiguration)
 		// kilocode_change start: Listen for model changes in virtual quota fallback
 		if (this.api instanceof VirtualQuotaFallbackHandler) {
@@ -611,21 +615,38 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// For history items, use the stored values; for new tasks, we'll set them
 		// after getting state.
 		if (historyItem) {
-			this._taskMode = historyItem.mode || defaultModeSlug
-			this._taskApiConfigName = historyItem.apiConfigName
+			this.sessionRuntimeConfig = this.createSessionRuntimeConfigFromHistoryItem(
+				historyItem,
+				this.apiConfiguration,
+				provider.getRuntimeProviderProfile?.().currentApiConfigName,
+			)
+			this._taskMode = this.sessionRuntimeConfig.currentMode || historyItem.mode || defaultModeSlug
+			this._taskApiConfigName = this.getCurrentSessionModeBinding()?.apiConfigName ?? historyItem.apiConfigName
+			const restoredApiConfiguration = this.getSessionApiConfiguration()
+			this.apiConfiguration = restoredApiConfiguration
+			this.api = buildApiHandler(restoredApiConfiguration)
 			this.taskModeReady = Promise.resolve()
 			this.taskApiConfigReady = Promise.resolve()
 			TelemetryService.instance.captureTaskRestarted(this.taskId)
 
 			// For history items, use the persisted tool protocol if available.
 			// If not available (old tasks), it will be detected in resumeTaskFromHistory.
-			this._taskToolProtocol = historyItem.toolProtocol
+			this._taskToolProtocol = this.sessionRuntimeConfig.toolProtocol ?? historyItem.toolProtocol
+			this.refreshSessionRuntimeActiveMetadata()
 		} else {
-			// For new tasks, don't set the mode/apiConfigName yet - wait for async initialization.
-			this._taskMode = undefined
-			this._taskApiConfigName = undefined
-			this.taskModeReady = this.initializeTaskMode(provider)
-			this.taskApiConfigReady = this.initializeTaskApiConfigName(provider)
+			const runtimeProfile = provider.getRuntimeProviderProfile?.()
+			const initialMode = runtimeProfile?.currentMode ?? defaultModeSlug
+			this.sessionRuntimeConfig = this.createSessionRuntimeConfig({
+				currentMode: initialMode,
+				apiConfigName: runtimeProfile?.currentApiConfigName,
+				apiConfiguration: this.apiConfiguration,
+				source: "new-session",
+			})
+			// New sessions are seeded from the provider/window runtime snapshot exactly once.
+			this._taskMode = initialMode
+			this._taskApiConfigName = runtimeProfile?.currentApiConfigName
+			this.taskModeReady = Promise.resolve()
+			this.taskApiConfigReady = Promise.resolve()
 			TelemetryService.instance.captureTaskCreated(this.taskId)
 
 			// For new tasks, resolve and lock the tool protocol immediately.
@@ -633,6 +654,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// user settings change.
 			const modelInfo = this.api.getModel().info
 			this._taskToolProtocol = resolveToolProtocol(this.apiConfiguration, modelInfo)
+			this.setSessionModeBinding({
+				mode: initialMode,
+				apiConfigName: runtimeProfile?.currentApiConfigName,
+				apiConfiguration: this.apiConfiguration,
+				toolProtocol: this._taskToolProtocol,
+				source: "new-session",
+			})
 		}
 
 		// Initialize the assistant message parser based on the locked tool protocol.
@@ -651,9 +679,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 
 		this.messageQueueService.on("stateChanged", this.messageQueueStateChangedHandler)
-
-		// Listen for provider profile changes to update parser state
-		this.setupProviderProfileChangeListener(provider)
 
 		// Only set up diff strategy if diff is enabled.
 		if (this.diffEnabled) {
@@ -715,6 +740,165 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 	}
 
+	// kilocode_change start: session runtime config helpers
+	private createModeBinding(args: {
+		mode: string
+		apiConfigName?: string
+		apiConfiguration: ProviderSettings
+		toolProtocol?: ToolProtocol
+		source?: SessionRuntimeModeBinding["source"]
+		updatedAt?: number
+	}): SessionRuntimeModeBinding {
+		const apiConfiguration = { ...args.apiConfiguration }
+		return {
+			mode: args.mode,
+			apiConfigName: args.apiConfigName,
+			apiConfiguration,
+			provider: apiConfiguration.apiProvider,
+			modelId: getModelId(apiConfiguration),
+			toolProtocol: args.toolProtocol ?? apiConfiguration.toolProtocol,
+			updatedAt: args.updatedAt ?? Date.now(),
+			source: args.source,
+		}
+	}
+
+	private createSessionRuntimeConfig(args: {
+		currentMode: string
+		apiConfigName?: string
+		apiConfiguration: ProviderSettings
+		toolProtocol?: ToolProtocol
+		source?: SessionRuntimeConfig["source"]
+		updatedAt?: number
+	}): SessionRuntimeConfig {
+		const updatedAt = args.updatedAt ?? Date.now()
+		const binding = this.createModeBinding({ ...args, mode: args.currentMode, updatedAt })
+		return {
+			version: 1,
+			sessionId: this.taskId,
+			taskId: this.taskId,
+			currentMode: args.currentMode,
+			modeBindings: { [args.currentMode]: binding },
+			activeApiConfigName: binding.apiConfigName,
+			activeProvider: binding.provider,
+			activeModelId: binding.modelId,
+			toolProtocol: binding.toolProtocol,
+			updatedAt,
+			source: args.source,
+		}
+	}
+
+	private createSessionRuntimeConfigFromHistoryItem(
+		historyItem: HistoryItem,
+		apiConfiguration: ProviderSettings,
+		fallbackApiConfigName?: string,
+	): SessionRuntimeConfig {
+		if (historyItem.sessionRuntimeConfig) {
+			const restored = this.cloneSessionRuntimeConfig(historyItem.sessionRuntimeConfig)
+			return {
+				...restored,
+				sessionId: restored.sessionId ?? historyItem.id,
+				taskId: restored.taskId ?? historyItem.id,
+				currentMode: restored.currentMode ?? historyItem.mode ?? defaultModeSlug,
+				updatedAt: restored.updatedAt ?? Date.now(),
+				source: restored.source ?? "history",
+			}
+		}
+
+		return this.createSessionRuntimeConfig({
+			currentMode: historyItem.mode || defaultModeSlug,
+			apiConfigName: historyItem.apiConfigName ?? fallbackApiConfigName,
+			apiConfiguration,
+			toolProtocol: historyItem.toolProtocol ?? apiConfiguration.toolProtocol,
+			source: "legacy-history",
+		})
+	}
+
+	private cloneSessionRuntimeConfig(config: SessionRuntimeConfig): SessionRuntimeConfig {
+		const modeBindings = config.modeBindings ?? {}
+		return {
+			...config,
+			modeBindings: Object.fromEntries(
+				(Object.entries(modeBindings) as Array<[string, SessionRuntimeModeBinding]>).map(([mode, binding]) => [
+					mode,
+					{ ...binding, apiConfiguration: { ...binding.apiConfiguration } },
+				]),
+			),
+		}
+	}
+
+	private refreshSessionRuntimeActiveMetadata(): void {
+		const currentMode = this.sessionRuntimeConfig.currentMode ?? this._taskMode ?? defaultModeSlug
+		const binding = this.sessionRuntimeConfig.modeBindings?.[currentMode]
+		this.sessionRuntimeConfig = {
+			...this.sessionRuntimeConfig,
+			currentMode,
+			activeApiConfigName: binding?.apiConfigName,
+			activeProvider: binding?.apiConfiguration.apiProvider,
+			activeModelId: binding ? getModelId(binding.apiConfiguration) : undefined,
+			toolProtocol: binding?.toolProtocol ?? this._taskToolProtocol,
+			updatedAt: Date.now(),
+		}
+	}
+
+	public getSessionRuntimeConfig(): SessionRuntimeConfig {
+		this.refreshSessionRuntimeActiveMetadata()
+		return this.cloneSessionRuntimeConfig(this.sessionRuntimeConfig)
+	}
+
+	public getCurrentSessionModeBinding(): SessionRuntimeModeBinding | undefined {
+		const currentMode = this.sessionRuntimeConfig.currentMode ?? this._taskMode ?? defaultModeSlug
+		const binding = this.sessionRuntimeConfig.modeBindings?.[currentMode]
+		return binding ? { ...binding, apiConfiguration: { ...binding.apiConfiguration } } : undefined
+	}
+
+	public getSessionApiConfiguration(): ProviderSettings {
+		return { ...(this.getCurrentSessionModeBinding()?.apiConfiguration ?? this.apiConfiguration) }
+	}
+
+	public setSessionModeBinding(args: {
+		mode: string
+		apiConfigName?: string
+		apiConfiguration: ProviderSettings
+		toolProtocol?: ToolProtocol
+		source?: SessionRuntimeModeBinding["source"]
+	}): SessionRuntimeConfig {
+		const toolProtocol = args.toolProtocol ?? this._taskToolProtocol ?? args.apiConfiguration.toolProtocol
+		const binding = this.createModeBinding({ ...args, toolProtocol })
+		this.sessionRuntimeConfig = {
+			...this.sessionRuntimeConfig,
+			currentMode: args.mode,
+			modeBindings: {
+				...(this.sessionRuntimeConfig.modeBindings ?? {}),
+				[args.mode]: binding,
+			},
+			activeApiConfigName: binding.apiConfigName,
+			activeProvider: binding.provider,
+			activeModelId: binding.modelId,
+			toolProtocol: binding.toolProtocol ?? this.sessionRuntimeConfig.toolProtocol,
+			updatedAt: binding.updatedAt,
+			source: args.source,
+		}
+		this._taskMode = args.mode
+		this._taskApiConfigName = args.apiConfigName
+		this._taskToolProtocol = toolProtocol
+		this.apiConfiguration = { ...args.apiConfiguration }
+		return this.getSessionRuntimeConfig()
+	}
+
+	public switchSessionModeToExistingBinding(mode: string): SessionRuntimeModeBinding | undefined {
+		const binding = this.sessionRuntimeConfig.modeBindings?.[mode]
+		if (!binding) {
+			return undefined
+		}
+		this.sessionRuntimeConfig.currentMode = mode
+		this._taskMode = mode
+		this._taskApiConfigName = binding.apiConfigName
+		this.updateApiConfiguration(binding.apiConfiguration)
+		this.refreshSessionRuntimeActiveMetadata()
+		return { ...binding, apiConfiguration: { ...binding.apiConfiguration } }
+	}
+	// kilocode_change end
+
 	// kilocode_change start
 	private getContext(): vscode.ExtensionContext {
 		const context = this.context
@@ -769,10 +953,27 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private async initializeTaskMode(provider: ClineProvider): Promise<void> {
 		try {
 			const state = await provider.getState()
+			if (this.sessionRuntimeConfig.currentMode !== this._taskMode && this._taskMode !== undefined) {
+				return
+			}
 			this._taskMode = state?.mode || defaultModeSlug
+			this.setSessionModeBinding({
+				mode: this._taskMode ?? defaultModeSlug,
+				apiConfigName: this._taskApiConfigName ?? state?.currentApiConfigName,
+				apiConfiguration: this.apiConfiguration,
+				toolProtocol: this._taskToolProtocol,
+				source: "new-session",
+			})
 		} catch (error) {
 			// If there's an error getting state, use the default mode
 			this._taskMode = defaultModeSlug
+			this.setSessionModeBinding({
+				mode: this._taskMode ?? defaultModeSlug,
+				apiConfigName: this._taskApiConfigName,
+				apiConfiguration: this.apiConfiguration,
+				toolProtocol: this._taskToolProtocol,
+				source: "fallback",
+			})
 			// Use the provider's log method for better error visibility
 			const errorMessage = `Failed to initialize task mode: ${error instanceof Error ? error.message : String(error)}`
 			provider.log(errorMessage)
@@ -803,51 +1004,41 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private async initializeTaskApiConfigName(provider: ClineProvider): Promise<void> {
 		try {
 			const state = await provider.getState()
+			if (
+				this.sessionRuntimeConfig.activeApiConfigName !== this._taskApiConfigName &&
+				this._taskApiConfigName !== undefined
+			) {
+				return
+			}
 
 			// Avoid clobbering a newer value that may have been set while awaiting provider state
 			// (e.g., user switches provider profile immediately after task creation).
 			if (this._taskApiConfigName === undefined) {
 				this._taskApiConfigName = state?.currentApiConfigName ?? "default"
 			}
+			this.setSessionModeBinding({
+				mode: this._taskMode ?? state?.mode ?? defaultModeSlug,
+				apiConfigName: this._taskApiConfigName,
+				apiConfiguration: this.apiConfiguration,
+				toolProtocol: this._taskToolProtocol,
+				source: "new-session",
+			})
 		} catch (error) {
 			// If there's an error getting state, use the default profile (unless a newer value was set).
 			if (this._taskApiConfigName === undefined) {
 				this._taskApiConfigName = "default"
 			}
+			this.setSessionModeBinding({
+				mode: this._taskMode ?? defaultModeSlug,
+				apiConfigName: this._taskApiConfigName,
+				apiConfiguration: this.apiConfiguration,
+				toolProtocol: this._taskToolProtocol,
+				source: "fallback",
+			})
 			// Use the provider's log method for better error visibility
 			const errorMessage = `Failed to initialize task API config name: ${error instanceof Error ? error.message : String(error)}`
 			provider.log(errorMessage)
 		}
-	}
-
-	/**
-	 * Sets up a listener for provider profile changes to automatically update the parser state.
-	 * This ensures the XML/native protocol parser stays synchronized with the current model.
-	 *
-	 * @private
-	 * @param provider - The ClineProvider instance to listen to
-	 */
-	private setupProviderProfileChangeListener(provider: ClineProvider): void {
-		// Only set up listener if provider has the on method (may not exist in test mocks)
-		if (typeof provider.on !== "function") {
-			return
-		}
-
-		this.providerProfileChangeListener = async () => {
-			try {
-				const newState = await provider.getState()
-				if (newState?.apiConfiguration) {
-					this.updateApiConfiguration(newState.apiConfiguration)
-				}
-			} catch (error) {
-				console.error(
-					`[Task#${this.taskId}.${this.instanceId}] Failed to update API configuration on profile change:`,
-					error,
-				)
-			}
-		}
-
-		provider.on(RooCodeEventName.ProviderProfileChanged, this.providerProfileChangeListener)
 	}
 
 	/**
@@ -975,6 +1166,19 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		return this._taskApiConfigName
 	}
 
+	// kilocode_change start: session-local mode mutation for tests and runtime helpers
+	public setTaskMode(mode: string): void {
+		const existingBinding = this.sessionRuntimeConfig.modeBindings?.[mode]
+		this.setSessionModeBinding({
+			mode,
+			apiConfigName: existingBinding?.apiConfigName ?? this._taskApiConfigName,
+			apiConfiguration: existingBinding?.apiConfiguration ?? this.apiConfiguration,
+			toolProtocol: existingBinding?.toolProtocol ?? this._taskToolProtocol,
+			source: existingBinding?.source ?? "mode-switch",
+		})
+	}
+	// kilocode_change end
+
 	/**
 	 * Get the task API config name synchronously. This should only be used when you're certain
 	 * that the value has already been initialized (e.g., after waitForApiConfigInitialization).
@@ -1005,6 +1209,15 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 */
 	public setTaskApiConfigName(apiConfigName: string | undefined): void {
 		this._taskApiConfigName = apiConfigName
+		const currentMode = this.sessionRuntimeConfig.currentMode ?? this._taskMode ?? defaultModeSlug
+		const existingBinding = this.sessionRuntimeConfig.modeBindings?.[currentMode]
+		this.setSessionModeBinding({
+			mode: currentMode,
+			apiConfigName,
+			apiConfiguration: existingBinding?.apiConfiguration ?? this.apiConfiguration,
+			toolProtocol: existingBinding?.toolProtocol ?? this._taskToolProtocol,
+			source: existingBinding?.source ?? "profile-switch",
+		})
 	}
 
 	static create(options: TaskOptions): [Task, Promise<void>] {
@@ -1338,6 +1551,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				apiConfigName: this._taskApiConfigName, // Use the task's own provider profile, not the current provider profile.
 				initialStatus: this.initialStatus,
 				toolProtocol: this._taskToolProtocol, // Persist the locked tool protocol.
+				sessionRuntimeConfig: this.getSessionRuntimeConfig(), // kilocode_change: persist full session runtime snapshot.
 				cumulativeTotalCost: this.getCumulativeTotalCost(), // kilocode_change: include deleted message costs.
 			})
 
@@ -1512,7 +1726,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		// Automatically approve if the ask according to the user's settings.
 		const provider = this.providerRef.deref()
-		const state = provider ? await provider.getState() : undefined
+		const state = provider
+			? ((await provider.getState()) as Parameters<typeof checkAutoApproval>[0]["state"])
+			: undefined
 		const approval = await checkAutoApproval({ state, ask: type, text, isProtected })
 
 		if (approval.decision === "approve") {
@@ -1727,8 +1943,20 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 */
 	public updateApiConfiguration(newApiConfiguration: ProviderSettings): void {
 		// Update the configuration and rebuild the API handler
-		this.apiConfiguration = newApiConfiguration
+		this.apiConfiguration = { ...newApiConfiguration }
 		this.api = buildApiHandler(this.apiConfiguration)
+		const resolvedToolProtocol =
+			this._taskToolProtocol ?? resolveToolProtocol(this.apiConfiguration, this.api.getModel().info)
+
+		const currentMode = this.sessionRuntimeConfig.currentMode ?? this._taskMode ?? defaultModeSlug
+		const existingBinding = this.sessionRuntimeConfig.modeBindings?.[currentMode]
+		this.setSessionModeBinding({
+			mode: currentMode,
+			apiConfigName: existingBinding?.apiConfigName ?? this._taskApiConfigName,
+			apiConfiguration: this.apiConfiguration,
+			toolProtocol: existingBinding?.toolProtocol ?? resolvedToolProtocol,
+			source: existingBinding?.source ?? "profile-switch",
+		})
 
 		// IMPORTANT: Do NOT change the parser based on the new configuration!
 		// The task's tool protocol is locked at creation time and must remain
@@ -1759,13 +1987,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 				if (providerProfile) {
 					await provider.setProviderProfile(providerProfile)
-
-					// Update this task's API configuration to match the new profile
-					// This ensures the parser state is synchronized with the selected model
-					const newState = await provider.getState()
-					if (newState?.apiConfiguration) {
-						this.updateApiConfiguration(newState.apiConfiguration)
-					}
 				}
 
 				this.emit(RooCodeEventName.TaskUserMessage, this.taskId)
@@ -2442,19 +2663,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			this.cancelCurrentRequest()
 		} catch (error) {
 			console.error("Error cancelling current request:", error)
-		}
-
-		// Remove provider profile change listener
-		try {
-			if (this.providerProfileChangeListener) {
-				const provider = this.providerRef.deref()
-				if (provider) {
-					provider.off(RooCodeEventName.ProviderProfileChanged, this.providerProfileChangeListener)
-				}
-				this.providerProfileChangeListener = undefined
-			}
-		} catch (error) {
-			console.error("Error removing provider profile change listener:", error)
 		}
 
 		// Dispose message queue and remove event listeners.
@@ -4393,16 +4601,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		options: { skipProviderRateLimit?: boolean } = {},
 	): ApiStream {
 		const state = await this.providerRef.deref()?.getState()
+		const apiConfiguration = this.getSessionApiConfiguration()
 
 		const {
-			apiConfiguration,
 			autoApprovalEnabled,
 			requestDelaySeconds,
-			mode,
 			autoCondenseContext = true,
 			autoCondenseContextPercent = 100,
 			profileThresholds = {},
 		} = state ?? {}
+		const mode = this._taskMode ?? state?.mode ?? defaultModeSlug
 
 		// Get condensing configuration for automatic triggers.
 		const customCondensingPrompt = state?.customCondensingPrompt

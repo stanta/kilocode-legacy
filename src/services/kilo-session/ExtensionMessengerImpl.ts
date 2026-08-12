@@ -14,8 +14,8 @@ export class ExtensionMessengerImpl implements IExtensionMessenger {
 	}
 
 	async requestSingleCompletion(prompt: string, timeoutMs: number): Promise<string> {
-		const state = await this.provider.getState()
-		if (!state?.apiConfiguration) {
+		const apiConfiguration = await this.provider.getEffectiveApiConfiguration()
+		if (!apiConfiguration) {
 			throw new Error("No API configuration available")
 		}
 
@@ -24,7 +24,7 @@ export class ExtensionMessengerImpl implements IExtensionMessenger {
 		})
 
 		try {
-			const completionPromise = singleCompletionHandler(state.apiConfiguration, prompt)
+			const completionPromise = singleCompletionHandler(apiConfiguration, prompt)
 			return await Promise.race([completionPromise, timeoutPromise])
 		} catch (error) {
 			if (error instanceof Error && error.message.includes("timed out")) {

@@ -1,5 +1,58 @@
 import { z } from "zod"
 
+import { providerSettingsSchema } from "./provider-settings.js"
+import { toolProtocolSchema } from "./tool.js"
+
+// kilocode_change start: versioned per-session runtime configuration
+export const sessionRuntimeModeBindingSchema = z.object({
+	mode: z.string(),
+	apiConfigName: z.string().optional(),
+	apiConfiguration: providerSettingsSchema,
+	provider: z.string().optional(),
+	modelId: z.string().optional(),
+	toolProtocol: toolProtocolSchema.optional(),
+	updatedAt: z.number(),
+	source: z
+		.enum([
+			"new-session",
+			"history",
+			"legacy-history",
+			"mode-switch",
+			"profile-switch",
+			"global-default",
+			"fallback",
+		])
+		.optional(),
+})
+
+export const sessionRuntimeConfigSchema = z.object({
+	version: z.literal(1),
+	sessionId: z.string().optional(),
+	taskId: z.string().optional(),
+	currentMode: z.string().optional(),
+	modeBindings: z.record(z.string(), sessionRuntimeModeBindingSchema).optional(),
+	activeApiConfigName: z.string().optional(),
+	activeProvider: z.string().optional(),
+	activeModelId: z.string().optional(),
+	toolProtocol: toolProtocolSchema.optional(),
+	updatedAt: z.number().optional(),
+	source: z
+		.enum([
+			"new-session",
+			"history",
+			"legacy-history",
+			"mode-switch",
+			"profile-switch",
+			"global-default",
+			"fallback",
+		])
+		.optional(),
+})
+
+export type SessionRuntimeModeBinding = z.infer<typeof sessionRuntimeModeBindingSchema>
+export type SessionRuntimeConfig = z.infer<typeof sessionRuntimeConfigSchema>
+// kilocode_change end
+
 /**
  * HistoryItem
  */
@@ -31,6 +84,7 @@ export const historyItemSchema = z.object({
 	 */
 	toolProtocol: z.enum(["xml", "native"]).optional(),
 	apiConfigName: z.string().optional(), // Provider profile name for sticky profile feature
+	sessionRuntimeConfig: sessionRuntimeConfigSchema.optional(), // kilocode_change: session-local mode/profile/model bindings
 	status: z.enum(["active", "completed", "delegated"]).optional(),
 	delegatedToId: z.string().optional(), // Last child this parent delegated to
 	childIds: z.array(z.string()).optional(), // All children spawned by this task

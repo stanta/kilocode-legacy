@@ -242,6 +242,12 @@ describe("ClineProvider - API Handler Rebuild Guard", () => {
 				apiProvider: "openrouter",
 				openRouterModelId: "openai/gpt-4",
 			}),
+			resolveProfile: vi.fn().mockResolvedValue({
+				name: "test-config",
+				id: "test-id",
+				apiProvider: "openrouter",
+				openRouterModelId: "openai/gpt-4",
+			}),
 			getProfile: vi.fn().mockResolvedValue({
 				name: "test-config",
 				id: "test-id",
@@ -430,8 +436,8 @@ describe("ClineProvider - API Handler Rebuild Guard", () => {
 
 			await provider.addClineToStack(mockTask)
 
-			// Mock activateProfile to return same provider/model but different non-model setting
-			;(provider as any).providerSettingsManager.activateProfile = vi.fn().mockResolvedValue({
+			// Mock non-mutating runtime resolver to return same provider/model but different non-model setting
+			;(provider as any).providerSettingsManager.resolveProfile = vi.fn().mockResolvedValue({
 				name: "test-config",
 				id: "test-id",
 				apiProvider: "openrouter",
@@ -472,8 +478,8 @@ describe("ClineProvider - API Handler Rebuild Guard", () => {
 
 			await provider.addClineToStack(mockTask)
 
-			// Mock activateProfile to return different provider
-			;(provider as any).providerSettingsManager.activateProfile = vi.fn().mockResolvedValue({
+			// Mock non-mutating runtime resolver to return different provider
+			;(provider as any).providerSettingsManager.resolveProfile = vi.fn().mockResolvedValue({
 				name: "anthropic-config",
 				id: "anthropic-id",
 				apiProvider: "anthropic",
@@ -511,8 +517,8 @@ describe("ClineProvider - API Handler Rebuild Guard", () => {
 
 			await provider.addClineToStack(mockTask)
 
-			// Mock activateProfile to return different model
-			;(provider as any).providerSettingsManager.activateProfile = vi.fn().mockResolvedValue({
+			// Mock non-mutating runtime resolver to return different model
+			;(provider as any).providerSettingsManager.resolveProfile = vi.fn().mockResolvedValue({
 				name: "test-config",
 				id: "test-id",
 				apiProvider: "openrouter",
@@ -553,7 +559,7 @@ describe("ClineProvider - API Handler Rebuild Guard", () => {
 			await provider.addClineToStack(mockTask)
 
 			// First switch: A -> B (openrouter -> anthropic)
-			;(provider as any).providerSettingsManager.activateProfile = vi.fn().mockResolvedValue({
+			;(provider as any).providerSettingsManager.resolveProfile = vi.fn().mockResolvedValue({
 				name: "anthropic-config",
 				id: "anthropic-id",
 				apiProvider: "anthropic",
@@ -567,7 +573,7 @@ describe("ClineProvider - API Handler Rebuild Guard", () => {
 
 			// Second switch: B -> A (anthropic -> openrouter gpt-4)
 			;(mockTask.updateApiConfiguration as any).mockClear()
-			;(provider as any).providerSettingsManager.activateProfile = vi.fn().mockResolvedValue({
+			;(provider as any).providerSettingsManager.resolveProfile = vi.fn().mockResolvedValue({
 				name: "test-config",
 				id: "test-id",
 				apiProvider: "openrouter",

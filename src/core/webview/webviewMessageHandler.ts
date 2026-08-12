@@ -573,13 +573,12 @@ export const webviewMessageHandler = async (
 						}
 					}
 
-					const currentConfigName = getGlobalState("currentApiConfigName")
+					const currentConfigName = provider.getRuntimeProviderProfile().currentApiConfigName
 
 					if (currentConfigName) {
 						if (!(await provider.providerSettingsManager.hasConfig(currentConfigName))) {
 							// Current config name not valid, get first config in list.
 							const name = listApiConfig[0]?.name
-							await updateGlobalState("currentApiConfigName", name)
 
 							if (name) {
 								await provider.activateProviderProfile({ name })
@@ -2413,8 +2412,8 @@ export const webviewMessageHandler = async (
 					// Config might not exist yet, that's fine
 				}
 
-				// kilocode_change start: If we're updating the active profile, we need to activate it to ensure it's persisted
-				const currentApiConfigName = getGlobalState("currentApiConfigName") || "default"
+				// kilocode_change start: Activate only if updating this window's runtime profile
+				const currentApiConfigName = provider.getRuntimeProviderProfile().currentApiConfigName || "default"
 				const isActiveProfile = message.text === currentApiConfigName
 				await provider.upsertProviderProfile(message.text, configToSave, isActiveProfile) // Activate if it's the current active profile
 				vscode.commands.executeCommand("kilo-code.autocomplete.reload")
@@ -2448,9 +2447,13 @@ export const webviewMessageHandler = async (
 					// Delete the old configuration.
 					await provider.providerSettingsManager.deleteConfig(oldName)
 
-					// Re-activate to update the global settings related to the
-					// currently activated provider profile.
-					await provider.activateProviderProfile({ name: newName })
+					// kilocode_change start: rename updates the active session binding only when it was active there.
+					if (provider.getRuntimeProviderProfile().currentApiConfigName === oldName) {
+						await provider.activateProviderProfile({ name: newName })
+					} else {
+						await provider.postStateToWebview()
+					}
+					// kilocode_change end
 
 					// kilocode_change: Reload autocomplete model when API provider settings change
 					vscode.commands.executeCommand("kilo-code.autocomplete.reload")
@@ -2527,7 +2530,12 @@ export const webviewMessageHandler = async (
 
 				try {
 					await provider.providerSettingsManager.deleteConfig(oldName)
-					await provider.activateProviderProfile({ name: newName })
+					// kilocode_change: deleting the active profile applies the replacement only to this session.
+					if (provider.getRuntimeProviderProfile().currentApiConfigName === oldName) {
+						await provider.activateProviderProfile({ name: newName })
+					} else {
+						await provider.postStateToWebview()
+					}
 
 					// kilocode_change: Reload autocomplete model when API provider settings change
 					vscode.commands.executeCommand("kilo-code.autocomplete.reload")
@@ -2606,7 +2614,7 @@ export const webviewMessageHandler = async (
 					// Update state after saving the mode
 					const customModes = await provider.customModesManager.getCustomModes()
 					await updateGlobalState("customModes", customModes)
-					await updateGlobalState("mode", message.modeConfig.slug)
+					await provider.handleModeSwitch(message.modeConfig.slug as Mode)
 					await provider.postStateToWebview()
 
 					// Track telemetry for custom mode creation or update
@@ -2701,8 +2709,10 @@ export const webviewMessageHandler = async (
 					}
 				}
 
-				// Switch back to default mode after deletion
-				await updateGlobalState("mode", defaultModeSlug)
+				// Switch this session back to default mode after deletion when needed.
+				if ((await provider.getMode()) === message.slug) {
+					await provider.handleModeSwitch(defaultModeSlug as Mode)
+				}
 				await provider.postStateToWebview()
 			}
 			break
@@ -3835,7 +3845,7 @@ export const webviewMessageHandler = async (
 		case "fixMermaidSyntax":
 			if (message.text && message.requestId) {
 				try {
-					const { apiConfiguration } = await provider.getState()
+					const apiConfiguration = await provider.getEffectiveApiConfiguration()
 
 					const prompt = mermaidFixPrompt(message.values?.error || "Unknown syntax error", message.text)
 
@@ -4549,8 +4559,8 @@ export const webviewMessageHandler = async (
 					throw new Error("Missing prompt text")
 				}
 
-				// Always use current configuration
-				const config = (await provider.getState()).apiConfiguration
+				// Always use this session's current configuration.
+				const config = await provider.getEffectiveApiConfiguration()
 
 				// Call the single completion handler
 				const result = await singleCompletionHandler(config, text)

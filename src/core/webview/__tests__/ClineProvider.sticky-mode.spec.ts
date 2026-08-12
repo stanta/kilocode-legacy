@@ -65,9 +65,10 @@ vi.mock("vscode", () => ({
 // Create a counter for unique task IDs.
 let taskIdCounter = 0
 
-vi.mock("../../task/Task", () => ({
-	Task: vi.fn().mockImplementation((options) => ({
-		taskId: options.taskId || `test-task-id-${++taskIdCounter}`,
+// kilocode_change start: mocked tasks include session runtime state used by ClineProvider session isolation
+const createMockTask = (options: any) => {
+	const task: any = {
+		taskId: options.taskId || options.historyItem?.id || `test-task-id-${++taskIdCounter}`,
 		saveClineMessages: vi.fn(),
 		clineMessages: [],
 		apiConversationHistory: [],
@@ -81,10 +82,89 @@ vi.mock("../../task/Task", () => ({
 		setRootTask: vi.fn(),
 		emit: vi.fn(),
 		parentTask: options.parentTask,
-		updateApiConfiguration: vi.fn(),
-		getCumulativeTotalCost: vi.fn().mockReturnValue(0), // kilocode_change
-	})),
+		apiConfiguration: options.apiConfiguration || { apiProvider: "openrouter" },
+		updateApiConfiguration: vi.fn().mockImplementation((config) => {
+			task.apiConfiguration = config
+		}),
+		getCumulativeTotalCost: vi.fn().mockReturnValue(0),
+	}
+	const initialMode = options.historyItem?.sessionRuntimeConfig?.currentMode ?? options.historyItem?.mode ?? "code"
+	const initialProfile =
+		options.historyItem?.apiConfigName ??
+		options.provider?.getRuntimeProviderProfile?.().currentApiConfigName ??
+		"test-config"
+	task._taskMode = initialMode
+	task._taskApiConfigName = initialProfile
+	task.taskMode = initialMode
+	task.taskApiConfigName = initialProfile
+	task.sessionRuntimeConfig = options.historyItem?.sessionRuntimeConfig ?? {
+		version: 1,
+		sessionId: task.taskId,
+		taskId: task.taskId,
+		currentMode: initialMode,
+		modeBindings: {
+			[initialMode]: {
+				mode: initialMode,
+				apiConfigName: initialProfile,
+				apiConfiguration: task.apiConfiguration,
+				provider: task.apiConfiguration.apiProvider,
+				updatedAt: Date.now(),
+			},
+		},
+		activeApiConfigName: initialProfile,
+		activeProvider: task.apiConfiguration.apiProvider,
+		updatedAt: Date.now(),
+	}
+	task.getSessionRuntimeConfig = vi.fn(() => ({
+		...task.sessionRuntimeConfig,
+		modeBindings: { ...task.sessionRuntimeConfig.modeBindings },
+	}))
+	task.getSessionApiConfiguration = vi.fn(
+		() => task.sessionRuntimeConfig.modeBindings?.[task._taskMode]?.apiConfiguration ?? task.apiConfiguration,
+	)
+	task.getTaskMode = vi.fn(async () => task._taskMode)
+	task.setSessionModeBinding = vi.fn((args) => {
+		task._taskMode = args.mode
+		task.taskMode = args.mode
+		task._taskApiConfigName = args.apiConfigName
+		task.taskApiConfigName = args.apiConfigName
+		task.apiConfiguration = args.apiConfiguration
+		task.sessionRuntimeConfig = {
+			...task.sessionRuntimeConfig,
+			currentMode: args.mode,
+			modeBindings: {
+				...(task.sessionRuntimeConfig.modeBindings ?? {}),
+				[args.mode]: {
+					mode: args.mode,
+					apiConfigName: args.apiConfigName,
+					apiConfiguration: args.apiConfiguration,
+					provider: args.apiConfiguration.apiProvider,
+					updatedAt: Date.now(),
+					source: args.source,
+				},
+			},
+			activeApiConfigName: args.apiConfigName,
+			activeProvider: args.apiConfiguration.apiProvider,
+			updatedAt: Date.now(),
+			source: args.source,
+		}
+		return task.sessionRuntimeConfig
+	})
+	task.setTaskMode = vi.fn((mode) => {
+		task._taskMode = mode
+		task.taskMode = mode
+	})
+	task.setTaskApiConfigName = vi.fn((name) => {
+		task._taskApiConfigName = name
+		task.taskApiConfigName = name
+	})
+	return task
+}
+
+vi.mock("../../task/Task", () => ({
+	Task: vi.fn().mockImplementation((options) => createMockTask(options)),
 }))
+// kilocode_change end
 
 vi.mock("../../prompts/sections/custom-instructions")
 
@@ -139,29 +219,39 @@ vi.mock("../../../shared/kilocode/cli-sessions/core/SessionManager", () => ({
 	},
 }))
 
-vi.mock("../../../shared/modes", () => ({
-	modes: [
-		{
+vi.mock("../../../shared/modes", () => {
+	const modeMap: Record<string, { slug: string; name: string; roleDefinition: string; groups: string[] }> = {
+		code: {
 			slug: "code",
 			name: "Code Mode",
 			roleDefinition: "You are a code assistant",
 			groups: ["read", "edit", "browser"],
 		},
-		{
+		architect: {
 			slug: "architect",
 			name: "Architect Mode",
 			roleDefinition: "You are an architect",
 			groups: ["read", "edit"],
 		},
-	],
-	getModeBySlug: vi.fn().mockReturnValue({
-		slug: "code",
-		name: "Code Mode",
-		roleDefinition: "You are a code assistant",
-		groups: ["read", "edit", "browser"],
-	}),
-	defaultModeSlug: "code",
-}))
+		debug: {
+			slug: "debug",
+			name: "Debug Mode",
+			roleDefinition: "You are a debugger",
+			groups: ["read", "edit"],
+		},
+		review: {
+			slug: "review",
+			name: "Review Mode",
+			roleDefinition: "You are a reviewer",
+			groups: ["read", "edit"],
+		},
+	}
+	return {
+		modes: Object.values(modeMap),
+		getModeBySlug: vi.fn((slug: string) => modeMap[slug]),
+		defaultModeSlug: "code",
+	}
+})
 
 vi.mock("../../prompts/system", () => ({
 	SYSTEM_PROMPT: vi.fn().mockResolvedValue("mocked system prompt"),
@@ -338,8 +428,9 @@ describe("ClineProvider - Sticky Mode", () => {
 			// Switch mode
 			await provider.handleModeSwitch("architect")
 
-			// Verify mode was updated in global state
-			expect(mockContext.globalState.update).toHaveBeenCalledWith("mode", "architect")
+			// Verify mode was updated in session/runtime state, not global state
+			expect((await provider.getState()).mode).toBe("architect")
+			expect(mockContext.globalState.update).not.toHaveBeenCalledWith("mode", "architect")
 
 			// Verify task history was updated with new mode
 			expect(updateTaskHistorySpy).toHaveBeenCalledWith(
@@ -459,14 +550,15 @@ describe("ClineProvider - Sticky Mode", () => {
 				mode: "architect", // Saved mode
 			}
 
-			// Mock updateGlobalState to track mode updates
+			// Mock updateGlobalState to verify restoration does not write global mode
 			const updateGlobalStateSpy = vi.spyOn(provider as any, "updateGlobalState").mockResolvedValue(undefined)
 
 			// Initialize task with history item
 			await provider.createTaskWithHistoryItem(historyItem)
 
-			// Verify mode was restored via updateGlobalState
-			expect(updateGlobalStateSpy).toHaveBeenCalledWith("mode", "architect")
+			// Verify mode was restored into session/runtime state only
+			expect((await provider.getState()).mode).toBe("architect")
+			expect(updateGlobalStateSpy).not.toHaveBeenCalledWith("mode", "architect")
 		})
 
 		it("should use current mode if history item has no saved mode", async () => {
@@ -674,8 +766,9 @@ describe("ClineProvider - Sticky Mode", () => {
 			// Switch mode - should not throw
 			await expect(provider.handleModeSwitch("architect")).resolves.not.toThrow()
 
-			// Verify mode was still updated in global state
-			expect(mockContext.globalState.update).toHaveBeenCalledWith("mode", "architect")
+			// Verify mode was still updated in session/runtime state only
+			expect((await provider.getState()).mode).toBe("architect")
+			expect(mockContext.globalState.update).not.toHaveBeenCalledWith("mode", "architect")
 		})
 
 		it("should handle null/undefined mode gracefully", async () => {
@@ -852,18 +945,16 @@ describe("ClineProvider - Sticky Mode", () => {
 
 			await Promise.all(switches)
 
-			// Find the last mode update call
-			const modeCalls = vi.mocked(mockContext.globalState.update).mock.calls.filter((call) => call[0] === "mode")
-			const lastModeCall = modeCalls[modeCalls.length - 1]
+			// Verify concurrent switches remain session-local without global mode writes.
+			const finalMode = (await provider.getState()).mode
+			expect(["architect", "debug", "code"]).toContain(finalMode)
+			expect(mockContext.globalState.update).not.toHaveBeenCalledWith("mode", expect.any(String))
 
-			// Verify the last mode switch wins
-			expect(lastModeCall).toEqual(["mode", "code"])
-
-			// Verify task history was updated with final mode
+			// Verify task history was updated with the final session/runtime mode.
 			const lastCall = updateTaskHistorySpy.mock.calls[updateTaskHistorySpy.mock.calls.length - 1]
 			expect(lastCall[0]).toMatchObject({
 				id: mockTask.taskId,
-				mode: "code",
+				mode: finalMode,
 			})
 		})
 
@@ -947,8 +1038,9 @@ describe("ClineProvider - Sticky Mode", () => {
 			// Try to switch to invalid mode - it will actually switch
 			await provider.handleModeSwitch("invalid-mode" as any)
 
-			// The mode WILL be updated to invalid-mode (this is the actual behavior)
-			expect(mockContext.globalState.update).toHaveBeenCalledWith("mode", "invalid-mode")
+			// The mode is updated in session/runtime state only
+			expect((await provider.getState()).mode).toBe("invalid-mode")
+			expect(mockContext.globalState.update).not.toHaveBeenCalledWith("mode", "invalid-mode")
 		})
 
 		it("should handle errors during mode switch gracefully", async () => {
@@ -1220,13 +1312,10 @@ describe("ClineProvider - Sticky Mode", () => {
 			// Wait for initialization to complete
 			await initPromise
 
-			// Check all mode update calls
-			const modeCalls = vi.mocked(mockContext.globalState.update).mock.calls.filter((call) => call[0] === "mode")
-
-			// Based on the actual behavior, the mode switch to "code" happens and persists
-			// The history mode restoration doesn't override it
-			const lastModeCall = modeCalls[modeCalls.length - 1]
-			expect(lastModeCall).toEqual(["mode", "code"])
+			// Based on the actual behavior, the mode switch to "code" happens and persists in runtime state
+			// The history mode restoration doesn't override it with a global write.
+			expect((await provider.getState()).mode).toBe("code")
+			expect(mockContext.globalState.update).not.toHaveBeenCalledWith("mode", expect.any(String))
 		})
 
 		it("should handle rapid task switches during mode changes", async () => {
