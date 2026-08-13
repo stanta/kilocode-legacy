@@ -118,7 +118,8 @@ const createHistoryItem = (overrides: Partial<HistoryItem>): HistoryItem =>
 		...overrides,
 	}) as HistoryItem
 
-const createProvider = (history: HistoryItem[]): AllSessionsExportProvider => ({
+const createProvider = (history: HistoryItem[], cwd = "/workspace"): AllSessionsExportProvider => ({
+	cwd,
 	contextProxy: {
 		globalStorageUri: {
 			fsPath: "/global-storage",
@@ -149,7 +150,7 @@ describe("exportAllSessions", () => {
 		).rejects.toThrow("Export destination cannot be inside the Kilo Code tasks storage directory")
 	})
 
-	it("enumerates the real storage tasks directory and recursively copies raw task directories", async () => {
+	it("copies only current-project raw task directories and writes current-project task history", async () => {
 		const fileSystem = new MemoryFs()
 		const firstTask = createHistoryItem({ id: "task-1", task: "First", ts: 2 })
 		const secondTask = createHistoryItem({ id: "task-2", task: "Second", ts: 3, workspace: "/other" })
@@ -157,8 +158,9 @@ describe("exportAllSessions", () => {
 
 		fileSystem.addFile("/custom-storage/tasks/task-1/api_conversation_history.json", '[{"role":"user"}]')
 		fileSystem.addFile("/custom-storage/tasks/task-1/nested/blob.bin", "raw nested content")
+		fileSystem.addFile("/custom-storage/tasks/task-1/export_complete.json", "legacy marker in source")
 		fileSystem.addFile("/custom-storage/tasks/task-2/ui_messages.json", '[{"type":"say"}]')
-		fileSystem.addFile("/custom-storage/tasks/task-2/export_complete.json", "legacy marker in source")
+		fileSystem.addFile("/custom-storage/tasks/orphan-task/ui_messages.json", '[{"type":"say"}]')
 		fileSystem.addFile("/custom-storage/tasks/loose-file.txt", "not a directory")
 
 		const result = await exportAllSessions(provider, {
@@ -172,25 +174,50 @@ describe("exportAllSessions", () => {
 			taskHistoryPath: path.join(outputDir, "task_history.json"),
 			manifestPath: path.join(outputDir, "export_manifest.json"),
 			storageBasePath: "/custom-storage",
-			total: 2,
-			exported: 2,
+			total: 1,
+			exported: 1,
 			failed: [],
 		})
 
 		const historyJson = JSON.parse(fileSystem.files.get(result.taskHistoryPath)!)
-		expect(historyJson.map((item: HistoryItem) => item.id).sort()).toEqual(["task-1", "task-2"])
+		expect(historyJson.map((item: HistoryItem) => item.id)).toEqual(["task-1"])
 		expect(fileSystem.files.get(path.join(outputDir, "tasks", "task-1", "api_conversation_history.json"))).toBe(
 			'[{"role":"user"}]',
 		)
 		expect(fileSystem.files.get(path.join(outputDir, "tasks", "task-1", "nested", "blob.bin"))).toBe(
 			"raw nested content",
 		)
-		expect(fileSystem.files.get(path.join(outputDir, "tasks", "task-2", "ui_messages.json"))).toBe(
-			'[{"type":"say"}]',
-		)
-		expect(fileSystem.files.get(path.join(outputDir, "tasks", "task-2", "export_complete.json"))).toBe(
+		expect(fileSystem.files.get(path.join(outputDir, "tasks", "task-1", "export_complete.json"))).toBe(
 			"legacy marker in source",
 		)
+		expect(fileSystem.files.has(path.join(outputDir, "tasks", "task-2", "ui_messages.json"))).toBe(false)
+		expect(fileSystem.files.has(path.join(outputDir, "tasks", "orphan-task", "ui_messages.json"))).toBe(false)
+
+		const manifest = JSON.parse(fileSystem.files.get(result.manifestPath)!)
+		expect(manifest).toMatchObject({
+			scope: "currentProject",
+			workspace: "/workspace",
+			total: 1,
+			exported: 1,
+			failed: [],
+		})
+	})
+
+	it("skips orphan storage task directories not represented in current-project history", async () => {
+		const fileSystem = new MemoryFs()
+		fileSystem.addFile("/global-storage/tasks/orphan-task/api_conversation_history.json", "orphan")
+
+		const result = await exportAllSessions(createProvider([]), {
+			fs: fileSystem,
+			outputDir,
+			getStorageBasePath: async (defaultPath) => defaultPath,
+		})
+
+		expect(result).toMatchObject({ total: 0, exported: 0, failed: [] })
+		expect(
+			fileSystem.files.has(path.join(outputDir, "tasks", "orphan-task", "api_conversation_history.json")),
+		).toBe(false)
+		expect(JSON.parse(fileSystem.files.get(result.taskHistoryPath)!)).toEqual([])
 	})
 
 	it("does not write export_complete.json into copied raw task directories", async () => {
@@ -209,7 +236,29 @@ describe("exportAllSessions", () => {
 		expect(manifest).toMatchObject({ total: 1, exported: 1, failed: [] })
 	})
 
-	it("handles a missing storage tasks directory as zero exported tasks", async () => {
+	it("records missing raw task directories for current-project history items", async () => {
+		const fileSystem = new MemoryFs()
+		const provider = createProvider([createHistoryItem({ id: "task-1" }), createHistoryItem({ id: "task-2" })])
+		fileSystem.addFile("/missing-storage/tasks/task-2/api_conversation_history.json", "task-2")
+
+		const result = await exportAllSessions(provider, {
+			fs: fileSystem,
+			outputDir,
+			getStorageBasePath: async () => "/missing-storage",
+		})
+
+		expect(result).toMatchObject({
+			total: 2,
+			exported: 1,
+			failed: [{ taskId: "task-1", error: "Task directory not found: /missing-storage/tasks/task-1" }],
+		})
+		expect(fileSystem.files.get(path.join(outputDir, "tasks", "task-2", "api_conversation_history.json"))).toBe(
+			"task-2",
+		)
+		expect(JSON.parse(fileSystem.files.get(result.taskHistoryPath)!)).toHaveLength(2)
+	})
+
+	it("records all current-project history items as missing when the storage tasks directory does not exist", async () => {
 		const fileSystem = new MemoryFs()
 		const provider = createProvider([createHistoryItem({ id: "task-1" })])
 
@@ -219,7 +268,11 @@ describe("exportAllSessions", () => {
 			getStorageBasePath: async () => "/missing-storage",
 		})
 
-		expect(result).toMatchObject({ total: 0, exported: 0, failed: [] })
+		expect(result).toMatchObject({
+			total: 1,
+			exported: 0,
+			failed: [{ taskId: "task-1", error: "Task directory not found: /missing-storage/tasks/task-1" }],
+		})
 		expect(JSON.parse(fileSystem.files.get(result.taskHistoryPath)!)).toHaveLength(1)
 	})
 
@@ -229,11 +282,14 @@ describe("exportAllSessions", () => {
 		fileSystem.addFile("/global-storage/tasks/task-2/api_conversation_history.json", "task-2")
 		fileSystem.copyFailures.add("/global-storage/tasks/task-1/api_conversation_history.json")
 
-		const result = await exportAllSessions(createProvider([]), {
-			fs: fileSystem,
-			outputDir,
-			getStorageBasePath: async (defaultPath) => defaultPath,
-		})
+		const result = await exportAllSessions(
+			createProvider([createHistoryItem({ id: "task-1" }), createHistoryItem({ id: "task-2" })]),
+			{
+				fs: fileSystem,
+				outputDir,
+				getStorageBasePath: async (defaultPath) => defaultPath,
+			},
+		)
 
 		expect(result.exported).toBe(1)
 		expect(result.failed).toEqual([
@@ -249,7 +305,7 @@ describe("exportAllSessions", () => {
 		fileSystem.addFile("/global-storage/tasks/task-1/api_conversation_history.json", "new")
 		fileSystem.addFile(path.join(outputDir, "tasks", "task-1", "api_conversation_history.json"), "old")
 
-		const result = await exportAllSessions(createProvider([]), {
+		const result = await exportAllSessions(createProvider([createHistoryItem({ id: "task-1" })]), {
 			fs: fileSystem,
 			outputDir,
 			getStorageBasePath: async (defaultPath) => defaultPath,

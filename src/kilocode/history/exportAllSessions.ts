@@ -12,6 +12,7 @@ import { getStorageBasePath } from "../../utils/storage"
  * passed directly.
  */
 export interface AllSessionsExportProvider {
+	cwd: string
 	contextProxy: {
 		globalStorageUri: {
 			fsPath: string
@@ -57,13 +58,14 @@ const defaultFs: FileSystemAdapter = {
 }
 
 /**
- * Exports all Kilo Code sessions.
+ * Exports all Kilo Code sessions for the current project.
  *
- * The full task history index is written to `task_history.json` from global
- * state, and every directory under the real storage `tasks/` directory is
- * recursively copied into `tasks/<taskDirName>/` in the caller-selected export
- * destination. Existing files at the destination are overwritten by the
- * recursive copy so rerunning the export refreshes the selected folder.
+ * The current project's task history index is written to `task_history.json`
+ * from global state, and every matching directory under the real storage
+ * `tasks/` directory is recursively copied into `tasks/<taskDirName>/` in the
+ * caller-selected export destination. Existing files at the destination are
+ * overwritten by the recursive copy so rerunning the export refreshes the
+ * selected folder.
  */
 export async function exportAllSessions(
 	provider: AllSessionsExportProvider,
@@ -73,7 +75,7 @@ export async function exportAllSessions(
 	const resolveStorageBasePath = options.getStorageBasePath ?? getStorageBasePath
 
 	if (!options.outputDir) {
-		throw new Error("An output directory is required to export all Kilo Code sessions")
+		throw new Error("An output directory is required to export current project Kilo Code sessions")
 	}
 
 	const outputDir = options.outputDir
@@ -87,24 +89,37 @@ export async function exportAllSessions(
 
 	await fileSystem.mkdir(destinationTasksDir, { recursive: true })
 
-	// Export the complete task history index from global state. This includes
-	// every session across all workspaces, matching what the extension stores.
 	const history = provider.getTaskHistory()
-	await fileSystem.writeFile(taskHistoryPath, JSON.stringify(history, null, 2), "utf8")
+	const currentProjectHistory = history.filter((item): item is HistoryItem & { id: string } => {
+		return Boolean(item.id && typeof item.workspace === "string" && item.workspace === provider.cwd)
+	})
+	const currentProjectTaskIds = [...new Set(currentProjectHistory.map((item) => item.id))].sort((a, b) =>
+		a.localeCompare(b),
+	)
 
-	const taskDirectories = await readTaskDirectories(fileSystem, sourceTasksDir)
+	await fileSystem.writeFile(taskHistoryPath, JSON.stringify(currentProjectHistory, null, 2), "utf8")
+
+	const taskDirectories = new Set(await readTaskDirectories(fileSystem, sourceTasksDir))
 
 	const result: ExportAllSessionsResult = {
 		outputDir,
 		taskHistoryPath,
 		manifestPath,
 		storageBasePath,
-		total: taskDirectories.length,
+		total: currentProjectTaskIds.length,
 		exported: 0,
 		failed: [],
 	}
 
-	for (const taskDirName of taskDirectories) {
+	for (const taskDirName of currentProjectTaskIds) {
+		if (!taskDirectories.has(taskDirName)) {
+			result.failed.push({
+				taskId: taskDirName,
+				error: `Task directory not found: ${path.join(sourceTasksDir, taskDirName)}`,
+			})
+			continue
+		}
+
 		try {
 			await copyDirectoryRecursive(
 				fileSystem,
@@ -122,6 +137,8 @@ export async function exportAllSessions(
 		JSON.stringify(
 			{
 				exportedAt: new Date().toISOString(),
+				scope: "currentProject",
+				workspace: provider.cwd,
 				storageBasePath,
 				sourceTasksDir,
 				outputDir,
