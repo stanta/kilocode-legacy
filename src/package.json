@@ -3,7 +3,7 @@
 	"displayName": "%extension.displayName%",
 	"description": "%extension.description%",
 	"publisher": "kilocode",
-	"version": "5.17.0",
+	"version": "5.17.2",
 	"icon": "assets/icons/logo-outline-black.png",
 	"galleryBanner": {
 		"color": "#FFFFFF",
@@ -154,6 +154,11 @@
 			{
 				"command": "kilo-code.exportDialogHistory",
 				"title": "Export Dialog History",
+				"category": "%configuration.title%"
+			},
+			{
+				"command": "kilo-code.exportAllSessions",
+				"title": "Export All Sessions",
 				"category": "%configuration.title%"
 			},
 			{

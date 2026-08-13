@@ -139,6 +139,26 @@ describe("parseKiloSlashCommands", () => {
 				expect(result.needsRulesFileCheck).toBe(false)
 			})
 		})
+
+		describe("/export_all_sessions command", () => {
+			it("should process /export_all_sessions without triggering the export command", async () => {
+				const text = "<task>/export_all_sessions</task>"
+				const result = await parseKiloSlashCommands(text, emptyToggles, emptyToggles)
+
+				expect(result.processedText).toContain('<explicit_instructions type="export_all_sessions">')
+				expect(result.processedText).toContain('"Kilo Code: Export All Sessions"')
+				expect(result.needsRulesFileCheck).toBe(false)
+			})
+
+			it("should process /export_all_sessions with additional input", async () => {
+				const text = "<user_message>/export_all_sessions back up everything</user_message>"
+				const result = await parseKiloSlashCommands(text, emptyToggles, emptyToggles)
+
+				expect(result.processedText).toContain('<explicit_instructions type="export_all_sessions">')
+				expect(result.processedText).toContain("back up everything")
+				expect(result.needsRulesFileCheck).toBe(false)
+			})
+		})
 	})
 
 	describe("tag patterns", () => {
