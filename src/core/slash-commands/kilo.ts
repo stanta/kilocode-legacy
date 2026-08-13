@@ -10,6 +10,12 @@ import {
 	condenseToolResponse,
 } from "../prompts/commands"
 
+export interface KiloSlashCommandResult {
+	processedText: string
+	needsRulesFileCheck: boolean
+	exportAllSessionsRequested?: boolean
+}
+
 function enabledWorkflowToggles(workflowToggles: ClineRulesToggles) {
 	return Object.entries(workflowToggles)
 		.filter(([_, enabled]) => enabled)
@@ -20,20 +26,6 @@ function enabledWorkflowToggles(workflowToggles: ClineRulesToggles) {
 }
 
 /**
- * Handles the `/export_all_sessions` slash command by returning instructions
- * only. The export itself has filesystem side effects, so it remains behind the
- * explicit `kilo-code.exportAllSessions` VS Code command.
- */
-export function exportAllSessionsToolResponse(userInput: string): string {
-	return `<explicit_instructions type="export_all_sessions">
-The user asked to export all Kilo Code sessions. Ask the user to run the "Kilo Code: Export All Sessions" command from the VS Code command palette, which copies the raw on-disk task files and writes the task_history.json index from global state into the workspace's .kilo/history/sessions directory. Do not trigger any export yourself.
-<user_input>
-${userInput}
-</user_input>
-</explicit_instructions>\n`
-}
-
-/**
  * This file is a duplicate of parseSlashCommands, but it adds a check for the newrule command
  * and processes Kilo-specific slash commands. It should be merged with parseSlashCommands in the future.
  */
@@ -41,7 +33,7 @@ export async function parseKiloSlashCommands(
 	text: string,
 	localWorkflowToggles: ClineRulesToggles,
 	globalWorkflowToggles: ClineRulesToggles,
-): Promise<{ processedText: string; needsRulesFileCheck: boolean }> {
+): Promise<KiloSlashCommandResult> {
 	const condenseAliases = condenseToolResponse
 
 	const commandReplacements: Record<string, ((userInput: string) => string) | undefined> = {
@@ -51,7 +43,6 @@ export async function parseKiloSlashCommands(
 		smol: condenseAliases,
 		condense: condenseAliases,
 		compact: condenseAliases,
-		export_all_sessions: exportAllSessionsToolResponse, // kilocode_change
 	}
 
 	// this currently allows matching prepended whitespace prior to /slash-command
@@ -64,6 +55,16 @@ export async function parseKiloSlashCommands(
 		const commandName = match[3]
 		const [slashCommandStartIndex, slashCommandEndIndex] = match.indices[2]
 		const textWithoutSlashCommand = text.slice(0, slashCommandStartIndex) + text.slice(slashCommandEndIndex)
+
+		// kilocode_change start
+		if (commandName === "export_all_sessions") {
+			return {
+				processedText: textWithoutSlashCommand,
+				needsRulesFileCheck: false,
+				exportAllSessionsRequested: true,
+			}
+		}
+		// kilocode_change end
 
 		const command = commandReplacements[commandName]
 		if (command) {

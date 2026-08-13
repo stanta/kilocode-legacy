@@ -96,6 +96,7 @@ import { TerminalRegistry } from "../../integrations/terminal/TerminalRegistry"
 import { calculateApiCostAnthropic, calculateApiCostOpenAI } from "../../shared/cost"
 import { getWorkspacePath } from "../../utils/path"
 import { sanitizeToolUseId } from "../../utils/tool-id"
+import { getCommand } from "../../utils/commands" // kilocode_change
 
 // prompts
 import { formatResponse } from "../prompts/responses"
@@ -4309,6 +4310,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	): Promise<[UserContent, string, boolean]> {
 		// Track if we need to check clinerulesFile
 		let needsClinerulesFileCheck = false
+		let exportAllSessionsCommandOpened = false // kilocode_change
 
 		// bookmark
 		const { localWorkflowToggles, globalWorkflowToggles } = await refreshWorkflowToggles(
@@ -4338,11 +4340,22 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							)
 
 							// when parsing slash commands, we still want to allow the user to provide their desired context
-							const { processedText, needsRulesFileCheck: needsCheck } = await parseKiloSlashCommands(
+							const {
+								processedText,
+								needsRulesFileCheck: needsCheck,
+								exportAllSessionsRequested,
+							} = await parseKiloSlashCommands(
 								parsedText.text,
 								localWorkflowToggles,
 								globalWorkflowToggles,
 							)
+
+							// kilocode_change start
+							if (exportAllSessionsRequested && !exportAllSessionsCommandOpened) {
+								exportAllSessionsCommandOpened = true
+								await vscode.commands.executeCommand(getCommand("exportAllSessions"))
+							}
+							// kilocode_change end
 
 							if (needsCheck) {
 								needsClinerulesFileCheck = true
@@ -4350,7 +4363,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 							return {
 								...block,
-								text: processedText,
+								text: exportAllSessionsRequested
+									? `${processedText}\nExport all sessions command has been opened.`
+									: processedText,
 							}
 						}
 					}

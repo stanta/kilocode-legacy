@@ -10,6 +10,7 @@ import { refreshWorkflowToggles } from "../context/instructions/workflows" // ki
 
 import * as vscode from "vscode" // kilocode_change
 import { ClineRulesToggles } from "../../shared/cline-rules"
+import { getCommand } from "../../utils/commands" // kilocode_change
 
 // This function is a duplicate of processUserContentMentions, but it adds a check for the newrules command
 // and processes Kilo-specific slash commands. It should be merged with processUserContentMentions in the future.
@@ -38,6 +39,7 @@ export async function processKiloUserContentMentions({
 }): Promise<[Anthropic.Messages.ContentBlockParam[], boolean]> {
 	// Track if we need to check kilorules file
 	let needsRulesFileCheck = false
+	let exportAllSessionsCommandOpened = false // kilocode_change
 
 	// kilocode_change
 	const mentionTagRegex = /<(?:task|feedback|answer|user_message)>/
@@ -62,11 +64,25 @@ export async function processKiloUserContentMentions({
 		)
 
 		// when parsing slash commands, we still want to allow the user to provide their desired context
-		const { processedText, needsRulesFileCheck: needsCheck } = await parseKiloSlashCommands(
-			parsedText.text,
-			localWorkflowToggles,
-			globalWorkflowToggles,
-		)
+		const {
+			processedText,
+			needsRulesFileCheck: needsCheck,
+			exportAllSessionsRequested,
+		} = await parseKiloSlashCommands(parsedText.text, localWorkflowToggles, globalWorkflowToggles)
+
+		// kilocode_change start
+		if (exportAllSessionsRequested) {
+			if (!exportAllSessionsCommandOpened) {
+				exportAllSessionsCommandOpened = true
+				await vscode.commands.executeCommand(getCommand("exportAllSessions"))
+			}
+
+			return {
+				processedText: `${processedText}\nExport all sessions command has been opened.`,
+				needsRulesFileCheck: needsCheck,
+			}
+		}
+		// kilocode_change end
 
 		return { processedText, needsRulesFileCheck: needsCheck }
 	}

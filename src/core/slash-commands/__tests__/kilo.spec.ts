@@ -141,21 +141,24 @@ describe("parseKiloSlashCommands", () => {
 		})
 
 		describe("/export_all_sessions command", () => {
-			it("should process /export_all_sessions without triggering the export command", async () => {
+			it("should return an action signal and strip /export_all_sessions", async () => {
 				const text = "<task>/export_all_sessions</task>"
 				const result = await parseKiloSlashCommands(text, emptyToggles, emptyToggles)
 
-				expect(result.processedText).toContain('<explicit_instructions type="export_all_sessions">')
-				expect(result.processedText).toContain('"Kilo Code: Export All Sessions"')
+				expect(result.processedText).toBe("<task></task>")
+				expect(result.processedText).not.toContain("explicit_instructions")
+				expect(result.exportAllSessionsRequested).toBe(true)
 				expect(result.needsRulesFileCheck).toBe(false)
 			})
 
-			it("should process /export_all_sessions with additional input", async () => {
+			it("should strip /export_all_sessions while preserving additional input", async () => {
 				const text = "<user_message>/export_all_sessions back up everything</user_message>"
 				const result = await parseKiloSlashCommands(text, emptyToggles, emptyToggles)
 
-				expect(result.processedText).toContain('<explicit_instructions type="export_all_sessions">')
+				expect(result.processedText).toBe("<user_message> back up everything</user_message>")
+				expect(result.processedText).not.toContain("explicit_instructions")
 				expect(result.processedText).toContain("back up everything")
+				expect(result.exportAllSessionsRequested).toBe(true)
 				expect(result.needsRulesFileCheck).toBe(false)
 			})
 		})

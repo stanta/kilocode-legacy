@@ -92,7 +92,8 @@ export const registerCommands = (options: RegisterCommandOptions) => {
 	}
 }
 
-const getCommandsMap = ({ context, outputChannel }: RegisterCommandOptions): Record<CommandId, any> => ({
+export const getCommandsMap = ({ context, outputChannel }: RegisterCommandOptions): Record<CommandId, any> => ({
+	// kilocode_change
 	activationCompleted: () => {},
 	// kilocode_change start
 	agentManagerOpen: () => {
@@ -297,8 +298,22 @@ const getCommandsMap = ({ context, outputChannel }: RegisterCommandOptions): Rec
 		if (!visibleProvider) return
 
 		try {
-			const result = await exportAllSessions(visibleProvider)
-			const message = `Exported ${result.exported} Kilo session(s), skipped ${result.skipped}, failed ${result.failed.length}. Output: ${result.outputDir}`
+			// kilocode_change start
+			const selectedFolders = await vscode.window.showOpenDialog({
+				canSelectFiles: false,
+				canSelectFolders: true,
+				canSelectMany: false,
+				title: "Select folder to export all Kilo Code sessions",
+			})
+
+			if (!selectedFolders?.[0]) {
+				vscode.window.showInformationMessage("Kilo session export cancelled.")
+				return
+			}
+
+			const result = await exportAllSessions(visibleProvider, { outputDir: selectedFolders[0].fsPath })
+			// kilocode_change end
+			const message = `Exported ${result.exported} of ${result.total} Kilo session task director${result.total === 1 ? "y" : "ies"}, failed ${result.failed.length}. Output: ${result.outputDir}`
 
 			outputChannel.appendLine(message)
 

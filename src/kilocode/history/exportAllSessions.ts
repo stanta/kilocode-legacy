@@ -4,8 +4,7 @@ import path from "path"
 
 import type { HistoryItem } from "@roo-code/types"
 
-import { GlobalFileNames } from "../../shared/globalFileNames"
-import { safeTaskId } from "./exportDialogHistory"
+import { getStorageBasePath } from "../../utils/storage"
 
 /**
  * The subset of {@link ClineProvider} needed to export every stored session.
@@ -13,153 +12,171 @@ import { safeTaskId } from "./exportDialogHistory"
  * passed directly.
  */
 export interface AllSessionsExportProvider {
-	cwd: string
+	contextProxy: {
+		globalStorageUri: {
+			fsPath: string
+		}
+	}
 	getTaskHistory(): HistoryItem[]
-	getTaskWithId(
-		id: string,
-		withMessage?: boolean,
-	): Promise<{
-		historyItem: HistoryItem
-		taskDirPath: string
-	}>
 }
 
 export interface ExportAllSessionsResult {
 	outputDir: string
 	taskHistoryPath: string
+	manifestPath: string
+	storageBasePath: string
 	total: number
 	exported: number
-	skipped: number
 	failed: Array<{ taskId: string; error: string }>
 }
 
-interface FileSystemAdapter {
+interface DirectoryEntry {
+	name: string
+	isDirectory(): boolean
+	isFile(): boolean
+}
+
+export interface FileSystemAdapter {
 	mkdir(path: string, options: { recursive: boolean }): Promise<void>
 	copyFile(src: string, dest: string): Promise<void>
 	writeFile(path: string, data: string, encoding: "utf8"): Promise<void>
-	access(path: string): Promise<void>
+	readdir(path: string, options: { withFileTypes: true }): Promise<DirectoryEntry[]>
 }
 
-interface ExportAllSessionsOptions {
+export interface ExportAllSessionsOptions {
 	fs?: FileSystemAdapter
 	outputDir?: string
+	getStorageBasePath?: (defaultPath: string) => Promise<string>
 }
-
-/**
- * The raw per-session files that are copied verbatim during export. These are
- * the exact on-disk files used by the extension to persist each task, so the
- * export preserves them byte-for-byte without any transformation.
- */
-const RAW_TASK_FILES = [
-	GlobalFileNames.apiConversationHistory,
-	GlobalFileNames.uiMessages,
-	GlobalFileNames.taskMetadata,
-]
-
-const EXPORT_COMPLETE_FILE = "export_complete.json"
 
 const defaultFs: FileSystemAdapter = {
 	mkdir: (dirPath, options) => fs.mkdir(dirPath, options).then(() => undefined),
 	copyFile: (src, dest) => fs.copyFile(src, dest),
 	writeFile: (filePath, data, encoding) => fs.writeFile(filePath, data, encoding),
-	access: (filePath) => fs.access(filePath),
+	readdir: (dirPath, options) => fs.readdir(dirPath, options),
 }
 
 /**
  * Exports all Kilo Code sessions.
  *
  * The full task history index is written to `task_history.json` from global
- * state, and each session's raw on-disk files are copied verbatim into a
- * `tasks/<taskId>/` subdirectory. Existing exports are never overwritten.
+ * state, and every directory under the real storage `tasks/` directory is
+ * recursively copied into `tasks/<taskDirName>/` in the caller-selected export
+ * destination. Existing files at the destination are overwritten by the
+ * recursive copy so rerunning the export refreshes the selected folder.
  */
 export async function exportAllSessions(
 	provider: AllSessionsExportProvider,
 	options: ExportAllSessionsOptions = {},
 ): Promise<ExportAllSessionsResult> {
 	const fileSystem = options.fs ?? defaultFs
-	const outputDir = options.outputDir ?? path.join(provider.cwd, ".kilo", "history", "sessions")
-	const taskHistoryPath = path.join(outputDir, "task_history.json")
+	const resolveStorageBasePath = options.getStorageBasePath ?? getStorageBasePath
 
-	await fileSystem.mkdir(outputDir, { recursive: true })
+	if (!options.outputDir) {
+		throw new Error("An output directory is required to export all Kilo Code sessions")
+	}
+
+	const outputDir = options.outputDir
+	const taskHistoryPath = path.join(outputDir, "task_history.json")
+	const manifestPath = path.join(outputDir, "export_manifest.json")
+	const storageBasePath = await resolveStorageBasePath(provider.contextProxy.globalStorageUri.fsPath)
+	const sourceTasksDir = path.join(storageBasePath, "tasks")
+	const destinationTasksDir = path.join(outputDir, "tasks")
+
+	await fileSystem.mkdir(destinationTasksDir, { recursive: true })
 
 	// Export the complete task history index from global state. This includes
 	// every session across all workspaces, matching what the extension stores.
 	const history = provider.getTaskHistory()
 	await fileSystem.writeFile(taskHistoryPath, JSON.stringify(history, null, 2), "utf8")
 
-	const tasks = history
-		.filter((item): item is HistoryItem & { id: string } => Boolean(item.id))
-		.sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0))
+	const taskDirectories = await readTaskDirectories(fileSystem, sourceTasksDir)
 
 	const result: ExportAllSessionsResult = {
 		outputDir,
 		taskHistoryPath,
-		total: tasks.length,
+		manifestPath,
+		storageBasePath,
+		total: taskDirectories.length,
 		exported: 0,
-		skipped: 0,
 		failed: [],
 	}
 
-	for (const task of tasks) {
-		const taskOutputDir = path.join(outputDir, "tasks", outputTaskDirName(task.id))
-		const completionPath = path.join(taskOutputDir, EXPORT_COMPLETE_FILE)
-
-		// Never overwrite a completed session export.
-		if (await pathExists(fileSystem, completionPath)) {
-			result.skipped++
-			continue
-		}
-
+	for (const taskDirName of taskDirectories) {
 		try {
-			const { taskDirPath } = await provider.getTaskWithId(task.id, false)
-			let copied = false
-
-			for (const fileName of RAW_TASK_FILES) {
-				const srcPath = path.join(taskDirPath, fileName)
-
-				if (!(await pathExists(fileSystem, srcPath))) {
-					continue
-				}
-
-				if (!copied) {
-					await fileSystem.mkdir(taskOutputDir, { recursive: true })
-				}
-
-				await fileSystem.copyFile(srcPath, path.join(taskOutputDir, fileName))
-				copied = true
-			}
-
-			if (copied) {
-				await fileSystem.writeFile(
-					completionPath,
-					JSON.stringify(
-						{ taskId: task.id, exportedAt: new Date().toISOString(), files: RAW_TASK_FILES },
-						null,
-						2,
-					),
-					"utf8",
-				)
-				result.exported++
-			} else {
-				result.failed.push({ taskId: task.id, error: "No raw session files found" })
-			}
+			await copyDirectoryRecursive(
+				fileSystem,
+				path.join(sourceTasksDir, taskDirName),
+				path.join(destinationTasksDir, taskDirName),
+			)
+			result.exported++
 		} catch (error) {
-			result.failed.push({ taskId: task.id, error: error instanceof Error ? error.message : String(error) })
+			result.failed.push({ taskId: taskDirName, error: error instanceof Error ? error.message : String(error) })
 		}
 	}
+
+	await fileSystem.writeFile(
+		manifestPath,
+		JSON.stringify(
+			{
+				exportedAt: new Date().toISOString(),
+				storageBasePath,
+				sourceTasksDir,
+				outputDir,
+				total: result.total,
+				exported: result.exported,
+				failed: result.failed,
+			},
+			null,
+			2,
+		),
+		"utf8",
+	)
 
 	return result
 }
 
-function outputTaskDirName(taskId: string): string {
-	return `${safeTaskId(taskId)}-${Buffer.from(taskId).toString("base64url")}`
+async function readTaskDirectories(fileSystem: FileSystemAdapter, sourceTasksDir: string): Promise<string[]> {
+	try {
+		const entries = await fileSystem.readdir(sourceTasksDir, { withFileTypes: true })
+		return entries
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name)
+			.sort((a, b) => a.localeCompare(b))
+	} catch (error) {
+		if (isMissingPathError(error)) {
+			return []
+		}
+
+		throw error
+	}
 }
 
-async function pathExists(fileSystem: FileSystemAdapter, targetPath: string): Promise<boolean> {
-	try {
-		await fileSystem.access(targetPath)
-		return true
-	} catch {
+async function copyDirectoryRecursive(
+	fileSystem: FileSystemAdapter,
+	sourceDir: string,
+	destinationDir: string,
+): Promise<void> {
+	await fileSystem.mkdir(destinationDir, { recursive: true })
+
+	const entries = await fileSystem.readdir(sourceDir, { withFileTypes: true })
+
+	for (const entry of entries) {
+		const sourcePath = path.join(sourceDir, entry.name)
+		const destinationPath = path.join(destinationDir, entry.name)
+
+		if (entry.isDirectory()) {
+			await copyDirectoryRecursive(fileSystem, sourcePath, destinationPath)
+		} else if (entry.isFile()) {
+			await fileSystem.copyFile(sourcePath, destinationPath)
+		}
+	}
+}
+
+function isMissingPathError(error: unknown): boolean {
+	if (typeof error !== "object" || error === null) {
 		return false
 	}
+
+	return "code" in error && error.code === "ENOENT"
 }
