@@ -136,6 +136,19 @@ describe("exportAllSessions", () => {
 		)
 	})
 
+	it("rejects destinations inside the source tasks directory", async () => {
+		const fileSystem = new MemoryFs()
+		fileSystem.addFile("/global-storage/tasks/task-1/api_conversation_history.json", "[]")
+
+		await expect(
+			exportAllSessions(createProvider([]), {
+				fs: fileSystem,
+				outputDir: "/global-storage/tasks/task-1/export",
+				getStorageBasePath: async (defaultPath) => defaultPath,
+			}),
+		).rejects.toThrow("Export destination cannot be inside the Kilo Code tasks storage directory")
+	})
+
 	it("enumerates the real storage tasks directory and recursively copies raw task directories", async () => {
 		const fileSystem = new MemoryFs()
 		const firstTask = createHistoryItem({ id: "task-1", task: "First", ts: 2 })

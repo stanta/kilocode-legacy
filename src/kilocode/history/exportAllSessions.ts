@@ -83,6 +83,8 @@ export async function exportAllSessions(
 	const sourceTasksDir = path.join(storageBasePath, "tasks")
 	const destinationTasksDir = path.join(outputDir, "tasks")
 
+	assertExportDestinationIsSafe(sourceTasksDir, destinationTasksDir)
+
 	await fileSystem.mkdir(destinationTasksDir, { recursive: true })
 
 	// Export the complete task history index from global state. This includes
@@ -179,4 +181,16 @@ function isMissingPathError(error: unknown): boolean {
 	}
 
 	return "code" in error && error.code === "ENOENT"
+}
+
+function assertExportDestinationIsSafe(sourceTasksDir: string, destinationTasksDir: string): void {
+	const normalizedSourceTasksDir = path.resolve(sourceTasksDir)
+	const normalizedDestinationTasksDir = path.resolve(destinationTasksDir)
+
+	if (
+		normalizedDestinationTasksDir === normalizedSourceTasksDir ||
+		normalizedDestinationTasksDir.startsWith(`${normalizedSourceTasksDir}${path.sep}`)
+	) {
+		throw new Error("Export destination cannot be inside the Kilo Code tasks storage directory")
+	}
 }
