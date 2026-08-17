@@ -127,15 +127,18 @@ describe("exportAllSessions command", () => {
 			manifestPath: "/selected/export/export_manifest.json",
 			storageBasePath: "/global-storage",
 			total: 2,
-			exported: 2,
+			exported: 1,
+			refreshed: 1,
+			skipped: 0,
 			failed: [],
+			warnings: [],
 		})
 
 		await getCommandsMap({ context, outputChannel, provider: visibleProvider }).exportAllSessions()
 
 		expect(exportAllSessions).toHaveBeenCalledWith(visibleProvider, { outputDir: "/selected/export" })
 		expect(vscode.window.showInformationMessage).toHaveBeenCalledWith(
-			"Exported 2 of 2 Kilo session task directories, failed 0. Output: /selected/export",
+			"Exported 1, refreshed 1, skipped 0 of 2 Kilo session task directories, failed 0. Output: /selected/export",
 		)
 	})
 })

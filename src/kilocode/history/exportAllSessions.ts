@@ -4,6 +4,7 @@ import path from "path"
 
 import type { HistoryItem } from "@roo-code/types"
 
+import { GlobalFileNames } from "../../shared/globalFileNames"
 import { getStorageBasePath } from "../../utils/storage"
 
 /**
@@ -28,7 +29,10 @@ export interface ExportAllSessionsResult {
 	storageBasePath: string
 	total: number
 	exported: number
+	refreshed: number
+	skipped: number
 	failed: Array<{ taskId: string; error: string }>
+	warnings: Array<{ taskId: string; warning: string }>
 }
 
 interface DirectoryEntry {
@@ -40,6 +44,7 @@ interface DirectoryEntry {
 export interface FileSystemAdapter {
 	mkdir(path: string, options: { recursive: boolean }): Promise<void>
 	copyFile(src: string, dest: string): Promise<void>
+	readFile(path: string, encoding: "utf8"): Promise<string>
 	writeFile(path: string, data: string, encoding: "utf8"): Promise<void>
 	readdir(path: string, options: { withFileTypes: true }): Promise<DirectoryEntry[]>
 }
@@ -53,8 +58,18 @@ export interface ExportAllSessionsOptions {
 const defaultFs: FileSystemAdapter = {
 	mkdir: (dirPath, options) => fs.mkdir(dirPath, options).then(() => undefined),
 	copyFile: (src, dest) => fs.copyFile(src, dest),
+	readFile: (filePath, encoding) => fs.readFile(filePath, encoding),
 	writeFile: (filePath, data, encoding) => fs.writeFile(filePath, data, encoding),
 	readdir: (dirPath, options) => fs.readdir(dirPath, options),
+}
+
+type MessageHistoryFile = "uiMessages" | "apiConversationHistory"
+
+type MessageCountResult = Partial<Record<MessageHistoryFile, number>>
+
+interface MessageCountComparison {
+	shouldRefresh: boolean
+	warnings: string[]
 }
 
 /**
@@ -63,9 +78,9 @@ const defaultFs: FileSystemAdapter = {
  * The current project's task history index is written to `task_history.json`
  * from global state, and every matching directory under the real storage
  * `tasks/` directory is recursively copied into `tasks/<taskDirName>/` in the
- * caller-selected export destination. Existing files at the destination are
- * overwritten by the recursive copy so rerunning the export refreshes the
- * selected folder.
+ * caller-selected export destination. Existing task directories are only
+ * refreshed when parseable source and destination message counts differ, so
+ * rerunning the export skips unchanged dialogs instead of overwriting them.
  */
 export async function exportAllSessions(
 	provider: AllSessionsExportProvider,
@@ -108,25 +123,43 @@ export async function exportAllSessions(
 		storageBasePath,
 		total: currentProjectTaskIds.length,
 		exported: 0,
+		refreshed: 0,
+		skipped: 0,
 		failed: [],
+		warnings: [],
 	}
 
 	for (const taskDirName of currentProjectTaskIds) {
+		const sourceTaskDir = path.join(sourceTasksDir, taskDirName)
+		const destinationTaskDir = path.join(destinationTasksDir, taskDirName)
+
 		if (!taskDirectories.has(taskDirName)) {
 			result.failed.push({
 				taskId: taskDirName,
-				error: `Task directory not found: ${path.join(sourceTasksDir, taskDirName)}`,
+				error: `Task directory not found: ${sourceTaskDir}`,
 			})
 			continue
 		}
 
 		try {
-			await copyDirectoryRecursive(
-				fileSystem,
-				path.join(sourceTasksDir, taskDirName),
-				path.join(destinationTasksDir, taskDirName),
-			)
-			result.exported++
+			if (!(await directoryExists(fileSystem, destinationTaskDir))) {
+				await copyDirectoryRecursive(fileSystem, sourceTaskDir, destinationTaskDir)
+				result.exported++
+				continue
+			}
+
+			const comparison = await compareTaskMessageCounts(fileSystem, sourceTaskDir, destinationTaskDir)
+
+			for (const warning of comparison.warnings) {
+				result.warnings.push({ taskId: taskDirName, warning })
+			}
+
+			if (comparison.shouldRefresh) {
+				await copyDirectoryRecursive(fileSystem, sourceTaskDir, destinationTaskDir)
+				result.refreshed++
+			} else {
+				result.skipped++
+			}
 		} catch (error) {
 			result.failed.push({ taskId: taskDirName, error: error instanceof Error ? error.message : String(error) })
 		}
@@ -144,7 +177,10 @@ export async function exportAllSessions(
 				outputDir,
 				total: result.total,
 				exported: result.exported,
+				refreshed: result.refreshed,
+				skipped: result.skipped,
 				failed: result.failed,
+				warnings: result.warnings,
 			},
 			null,
 			2,
@@ -153,6 +189,78 @@ export async function exportAllSessions(
 	)
 
 	return result
+}
+
+async function directoryExists(fileSystem: FileSystemAdapter, dirPath: string): Promise<boolean> {
+	try {
+		await fileSystem.readdir(dirPath, { withFileTypes: true })
+		return true
+	} catch (error) {
+		if (isMissingPathError(error)) {
+			return false
+		}
+
+		throw error
+	}
+}
+
+async function compareTaskMessageCounts(
+	fileSystem: FileSystemAdapter,
+	sourceTaskDir: string,
+	destinationTaskDir: string,
+): Promise<MessageCountComparison> {
+	const source = await readTaskMessageCounts(fileSystem, sourceTaskDir, "source")
+	const destination = await readTaskMessageCounts(fileSystem, destinationTaskDir, "destination")
+	const comparableFiles = messageHistoryFiles.filter(
+		(file) => source.counts[file.key] !== undefined && destination.counts[file.key] !== undefined,
+	)
+	const shouldRefresh = comparableFiles.some((file) => source.counts[file.key] !== destination.counts[file.key])
+	const warnings = [...source.warnings, ...destination.warnings]
+
+	if (comparableFiles.length === 0) {
+		warnings.push(
+			`No parseable message arrays found in ${GlobalFileNames.uiMessages} or ${GlobalFileNames.apiConversationHistory}; skipped existing destination task directory`,
+		)
+	}
+
+	return { shouldRefresh, warnings }
+}
+
+const messageHistoryFiles: Array<{ key: MessageHistoryFile; fileName: string }> = [
+	{ key: "uiMessages", fileName: GlobalFileNames.uiMessages },
+	{ key: "apiConversationHistory", fileName: GlobalFileNames.apiConversationHistory },
+]
+
+async function readTaskMessageCounts(
+	fileSystem: FileSystemAdapter,
+	taskDir: string,
+	label: "source" | "destination",
+): Promise<{ counts: MessageCountResult; warnings: string[] }> {
+	const counts: MessageCountResult = {}
+	const warnings: string[] = []
+
+	for (const file of messageHistoryFiles) {
+		const filePath = path.join(taskDir, file.fileName)
+
+		try {
+			const rawMessages = await fileSystem.readFile(filePath, "utf8")
+			const parsedMessages = JSON.parse(rawMessages) as unknown
+
+			if (Array.isArray(parsedMessages)) {
+				counts[file.key] = parsedMessages.length
+			} else {
+				warnings.push(`${label} ${file.fileName} is not a JSON array`)
+			}
+		} catch (error) {
+			if (!isMissingPathError(error)) {
+				warnings.push(
+					`Cannot parse ${label} ${file.fileName}: ${error instanceof Error ? error.message : String(error)}`,
+				)
+			}
+		}
+	}
+
+	return { counts, warnings }
 }
 
 async function readTaskDirectories(fileSystem: FileSystemAdapter, sourceTasksDir: string): Promise<string[]> {

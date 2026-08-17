@@ -313,7 +313,7 @@ export const getCommandsMap = ({ context, outputChannel }: RegisterCommandOption
 
 			const result = await exportAllSessions(visibleProvider, { outputDir: selectedFolders[0].fsPath })
 			// kilocode_change end
-			const message = `Exported ${result.exported} of ${result.total} Kilo session task director${result.total === 1 ? "y" : "ies"}, failed ${result.failed.length}. Output: ${result.outputDir}`
+			const message = `Exported ${result.exported}, refreshed ${result.refreshed}, skipped ${result.skipped} of ${result.total} Kilo session task director${result.total === 1 ? "y" : "ies"}, failed ${result.failed.length}. Output: ${result.outputDir}`
 
 			outputChannel.appendLine(message)
 
