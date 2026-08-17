@@ -1,4 +1,5 @@
 // kilocode_change - new file
+import { createHash } from "crypto"
 import fs from "fs/promises"
 import path from "path"
 
@@ -42,6 +43,7 @@ export interface FileSystemAdapter {
 	readFile(path: string, encoding: "utf8"): Promise<string>
 	writeFile(path: string, data: string, encoding: "utf8"): Promise<void>
 	readdir(path: string, options: { withFileTypes: true }): Promise<DirectoryEntry[]>
+	realpath?(path: string): Promise<string>
 }
 
 export interface ExportAllDialogsOptions {
@@ -79,17 +81,18 @@ const defaultFs: FileSystemAdapter = {
 	readFile: (filePath, encoding) => fs.readFile(filePath, encoding),
 	writeFile: (filePath, data, encoding) => fs.writeFile(filePath, data, encoding),
 	readdir: (dirPath, options) => fs.readdir(dirPath, options),
+	realpath: (filePath) => fs.realpath(filePath),
 }
 
 const includedSayKinds = new Set(["text", "completion_result", "subtask_result", "user_feedback"])
-const includedAskKinds = new Set(["followup", "completion_result", "tool"])
+const includedAskKinds = new Set(["followup", "completion_result", "tool", "command", "command_output"])
 
 /**
  * Exports text-only dialogs for current-project Kilo Code tasks.
  *
  * Unlike raw session export, this writes one Markdown dialog per task from
  * `ui_messages.json`, excluding internal API/checkpoint/reasoning noise and
- * skipping unchanged files by comparing extracted text message counts.
+ * skipping unchanged files by comparing extracted text message counts and a content hash.
  */
 export async function exportAllDialogs(
 	provider: AllDialogsExportProvider,
@@ -114,9 +117,17 @@ export async function exportAllDialogs(
 	await fileSystem.mkdir(dialogsDir, { recursive: true })
 
 	const history = provider.getTaskHistory()
-	const currentProjectHistory = history.filter((item): item is HistoryItem & { id: string } => {
-		return Boolean(item.id && typeof item.workspace === "string" && item.workspace === provider.cwd)
-	})
+	const currentProjectHistory: Array<HistoryItem & { id: string }> = []
+
+	for (const item of history) {
+		if (
+			item.id &&
+			typeof item.workspace === "string" &&
+			(await isSameWorkspace(fileSystem, item.workspace, provider.cwd))
+		) {
+			currentProjectHistory.push(item as HistoryItem & { id: string })
+		}
+	}
 	const currentProjectTaskIds = [...new Set(currentProjectHistory.map((item) => item.id))].sort((a, b) =>
 		a.localeCompare(b),
 	)
@@ -160,20 +171,21 @@ export async function exportAllDialogs(
 		try {
 			const uiMessages = await readJsonArray(fileSystem, uiMessagesPath)
 			const messages = extractTextDialogMessages(uiMessages)
-			const markdown = renderTextDialogMarkdown({ historyItem, messages })
-			const existingCount = await readExistingMessageCount(fileSystem, outputPath)
+			const contentHash = getTextDialogContentHash(messages)
+			const markdown = renderTextDialogMarkdown({ historyItem, messages, contentHash })
+			const existingMetadata = await readExistingExportMetadata(fileSystem, outputPath)
 
-			if (existingCount === undefined) {
+			if (existingMetadata === undefined) {
 				await fileSystem.writeFile(outputPath, markdown, "utf8")
 				result.exported++
 				continue
 			}
 
-			if (existingCount.warning) {
-				result.warnings.push({ taskId, warning: existingCount.warning })
+			for (const warning of existingMetadata.warnings) {
+				result.warnings.push({ taskId, warning })
 			}
 
-			if (existingCount.messageCount !== messages.length) {
+			if (existingMetadata.messageCount !== messages.length || existingMetadata.contentHash !== contentHash) {
 				await fileSystem.writeFile(outputPath, markdown, "utf8")
 				result.refreshed++
 			} else {
@@ -315,12 +327,30 @@ function extractContentPartText(part: unknown): string {
 	return ""
 }
 
+function getTextDialogContentHash(messages: TextDialogMessage[]): string {
+	return createHash("sha256")
+		.update(
+			JSON.stringify(
+				messages.map((message) => ({
+					role: message.role,
+					type: message.type,
+					kind: message.kind,
+					text: message.text,
+					ts: message.ts ?? null,
+				})),
+			),
+		)
+		.digest("hex")
+}
+
 function renderTextDialogMarkdown({
 	historyItem,
 	messages,
+	contentHash,
 }: {
 	historyItem: HistoryItem
 	messages: TextDialogMessage[]
+	contentHash: string
 }): string {
 	const title = historyItem.task || "Untitled dialog"
 	const lines = [
@@ -332,6 +362,7 @@ function renderTextDialogMarkdown({
 		`mode: ${JSON.stringify(historyItem.mode ?? "")}`,
 		`source: ${JSON.stringify("ui_messages.json")}`,
 		`messageCount: ${messages.length}`,
+		`contentHash: ${JSON.stringify(contentHash)}`,
 		"---",
 		"",
 		`# ${title}`,
@@ -365,22 +396,29 @@ async function readJsonArray(fileSystem: FileSystemAdapter, filePath: string): P
 	return parsed
 }
 
-async function readExistingMessageCount(
+async function readExistingExportMetadata(
 	fileSystem: FileSystemAdapter,
 	filePath: string,
-): Promise<{ messageCount: number; warning?: string } | undefined> {
+): Promise<{ messageCount: number; contentHash?: string; warnings: string[] } | undefined> {
 	try {
 		const content = await fileSystem.readFile(filePath, "utf8")
-		const match = /^messageCount:\s*(\d+)\s*$/m.exec(content)
+		const messageCountMatch = /^messageCount:\s*(\d+)\s*$/m.exec(content)
+		const contentHashMatch = /^contentHash:\s*(?:"([a-f0-9]{64})"|([a-f0-9]{64}))\s*$/m.exec(content)
+		const warnings: string[] = []
 
-		if (!match) {
-			return {
-				messageCount: -1,
-				warning: `Cannot parse existing messageCount in ${filePath}; refreshed dialog markdown`,
-			}
+		if (!messageCountMatch) {
+			warnings.push(`Cannot parse existing messageCount in ${filePath}; refreshed dialog markdown`)
 		}
 
-		return { messageCount: Number(match[1]) }
+		if (!contentHashMatch) {
+			warnings.push(`Cannot parse existing contentHash in ${filePath}; refreshed dialog markdown`)
+		}
+
+		return {
+			messageCount: messageCountMatch ? Number(messageCountMatch[1]) : -1,
+			contentHash: contentHashMatch?.[1] ?? contentHashMatch?.[2],
+			warnings,
+		}
 	} catch (error) {
 		if (isMissingPathError(error)) {
 			return undefined
@@ -388,6 +426,23 @@ async function readExistingMessageCount(
 
 		throw error
 	}
+}
+
+async function isSameWorkspace(fileSystem: FileSystemAdapter, left: string, right: string): Promise<boolean> {
+	return (await normalizeWorkspacePath(fileSystem, left)) === (await normalizeWorkspacePath(fileSystem, right))
+}
+
+async function normalizeWorkspacePath(fileSystem: FileSystemAdapter, workspacePath: string): Promise<string> {
+	const resolvedPath = path.resolve(workspacePath)
+	let normalizedPath = path.normalize(resolvedPath)
+
+	try {
+		normalizedPath = path.normalize(await (fileSystem.realpath?.(resolvedPath) ?? fs.realpath(resolvedPath)))
+	} catch {
+		normalizedPath = path.normalize(resolvedPath)
+	}
+
+	return process.platform === "win32" ? normalizedPath.toLowerCase() : normalizedPath
 }
 
 async function readTaskDirectories(fileSystem: FileSystemAdapter, sourceTasksDir: string): Promise<string[]> {
