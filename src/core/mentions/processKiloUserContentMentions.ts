@@ -40,6 +40,7 @@ export async function processKiloUserContentMentions({
 	// Track if we need to check kilorules file
 	let needsRulesFileCheck = false
 	let exportAllSessionsCommandOpened = false // kilocode_change
+	let exportAllDialogsCommandOpened = false // kilocode_change
 
 	// kilocode_change
 	const mentionTagRegex = /<(?:task|feedback|answer|user_message)>/
@@ -68,6 +69,7 @@ export async function processKiloUserContentMentions({
 			processedText,
 			needsRulesFileCheck: needsCheck,
 			exportAllSessionsRequested,
+			exportAllDialogsRequested,
 		} = await parseKiloSlashCommands(parsedText.text, localWorkflowToggles, globalWorkflowToggles)
 
 		// kilocode_change start
@@ -79,6 +81,18 @@ export async function processKiloUserContentMentions({
 
 			return {
 				processedText: `${processedText}\nExport all sessions command has been opened.`,
+				needsRulesFileCheck: needsCheck,
+			}
+		}
+
+		if (exportAllDialogsRequested) {
+			if (!exportAllDialogsCommandOpened) {
+				exportAllDialogsCommandOpened = true
+				await vscode.commands.executeCommand(getCommand("exportAllDialogs"))
+			}
+
+			return {
+				processedText: `${processedText}\nExport all dialogs command has been opened.`,
 				needsRulesFileCheck: needsCheck,
 			}
 		}

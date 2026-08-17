@@ -162,6 +162,29 @@ describe("parseKiloSlashCommands", () => {
 				expect(result.needsRulesFileCheck).toBe(false)
 			})
 		})
+
+		describe("/export_all_dialogs command", () => {
+			it("should return an action signal and strip /export_all_dialogs", async () => {
+				const text = "<task>/export_all_dialogs</task>"
+				const result = await parseKiloSlashCommands(text, emptyToggles, emptyToggles)
+
+				expect(result.processedText).toBe("<task></task>")
+				expect(result.processedText).not.toContain("explicit_instructions")
+				expect(result.exportAllDialogsRequested).toBe(true)
+				expect(result.needsRulesFileCheck).toBe(false)
+			})
+
+			it("should strip /export_all_dialogs while preserving additional input", async () => {
+				const text = "<user_message>/export_all_dialogs back up text</user_message>"
+				const result = await parseKiloSlashCommands(text, emptyToggles, emptyToggles)
+
+				expect(result.processedText).toBe("<user_message> back up text</user_message>")
+				expect(result.processedText).not.toContain("explicit_instructions")
+				expect(result.processedText).toContain("back up text")
+				expect(result.exportAllDialogsRequested).toBe(true)
+				expect(result.needsRulesFileCheck).toBe(false)
+			})
+		})
 	})
 
 	describe("tag patterns", () => {

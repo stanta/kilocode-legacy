@@ -2,4 +2,4 @@
 "kilo-code": minor
 ---
 
-Add `/export_all_sessions` slash command and `kilo-code.exportAllSessions` command to export current project sessions, preserving the raw on-disk task files and writing the `task_history.json` index.
+Add `/export_all_sessions` and `/export_all_dialogs` export commands for current project session backups, including raw task files and text-only dialog histories.

@@ -21,6 +21,7 @@ import { generateTerminalCommand } from "../utils/terminalCommandGenerator" // k
 import { AgentManagerProvider } from "../core/kilocode/agent-manager/AgentManagerProvider" // kilocode_change
 import { exportDialogHistory } from "../kilocode/history/exportDialogHistory" // kilocode_change
 import { exportAllSessions } from "../kilocode/history/exportAllSessions" // kilocode_change
+import { exportAllDialogs } from "../kilocode/history/exportAllDialogs" // kilocode_change
 
 /**
  * Helper to get the visible ClineProvider instance or log if not found.
@@ -324,6 +325,42 @@ export const getCommandsMap = ({ context, outputChannel }: RegisterCommandOption
 			}
 		} catch (error) {
 			const message = `Failed to export Kilo sessions: ${error instanceof Error ? error.message : String(error)}`
+
+			outputChannel.appendLine(message)
+			vscode.window.showErrorMessage(message)
+		}
+	},
+	exportAllDialogs: async () => {
+		const visibleProvider = getVisibleProviderOrLog(outputChannel)
+		if (!visibleProvider) return
+
+		try {
+			// kilocode_change start
+			const selectedFolders = await vscode.window.showOpenDialog({
+				canSelectFiles: false,
+				canSelectFolders: true,
+				canSelectMany: false,
+				title: "Select folder to export current project Kilo Code text dialogs",
+			})
+
+			if (!selectedFolders?.[0]) {
+				vscode.window.showInformationMessage("Kilo text dialog export cancelled.")
+				return
+			}
+
+			const result = await exportAllDialogs(visibleProvider, { outputDir: selectedFolders[0].fsPath })
+			// kilocode_change end
+			const message = `Exported ${result.exported}, refreshed ${result.refreshed}, skipped ${result.skipped} of ${result.total} Kilo text dialog${result.total === 1 ? "" : "s"}, failed ${result.failed.length}. Output: ${result.outputDir}`
+
+			outputChannel.appendLine(message)
+
+			if (result.failed.length > 0) {
+				vscode.window.showWarningMessage(message)
+			} else {
+				vscode.window.showInformationMessage(message)
+			}
+		} catch (error) {
+			const message = `Failed to export Kilo text dialogs: ${error instanceof Error ? error.message : String(error)}`
 
 			outputChannel.appendLine(message)
 			vscode.window.showErrorMessage(message)

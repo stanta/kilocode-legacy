@@ -235,5 +235,46 @@ describe("processKiloUserContentMentions - slash command regression", () => {
 				],
 			})
 		})
+
+		it("should execute export all dialogs command once and return deterministic user-visible text", async () => {
+			vi.mocked(parseKiloSlashCommands).mockResolvedValue({
+				processedText: "<user_message></user_message>",
+				needsRulesFileCheck: false,
+				exportAllDialogsRequested: true,
+			})
+
+			const userContent = [
+				{
+					type: "tool_result" as const,
+					tool_use_id: "call_export_dialogs",
+					content: [
+						{ type: "text" as const, text: "<user_message>/export_all_dialogs</user_message>" },
+						{ type: "text" as const, text: "<user_message>/export_all_dialogs again</user_message>" },
+					],
+				},
+			]
+
+			const [result] = await processKiloUserContentMentions({
+				...defaultParams,
+				userContent,
+			})
+
+			expect(vscode.commands.executeCommand).toHaveBeenCalledTimes(1)
+			expect(vscode.commands.executeCommand).toHaveBeenCalledWith("kilo-code.exportAllDialogs")
+			expect(result[0]).toEqual({
+				type: "tool_result",
+				tool_use_id: "call_export_dialogs",
+				content: [
+					{
+						type: "text",
+						text: "<user_message></user_message>\nExport all dialogs command has been opened.",
+					},
+					{
+						type: "text",
+						text: "<user_message></user_message>\nExport all dialogs command has been opened.",
+					},
+				],
+			})
+		})
 	})
 })

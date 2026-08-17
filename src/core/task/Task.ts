@@ -4311,6 +4311,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Track if we need to check clinerulesFile
 		let needsClinerulesFileCheck = false
 		let exportAllSessionsCommandOpened = false // kilocode_change
+		let exportAllDialogsCommandOpened = false // kilocode_change
 
 		// bookmark
 		const { localWorkflowToggles, globalWorkflowToggles } = await refreshWorkflowToggles(
@@ -4344,6 +4345,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								processedText,
 								needsRulesFileCheck: needsCheck,
 								exportAllSessionsRequested,
+								exportAllDialogsRequested,
 							} = await parseKiloSlashCommands(
 								parsedText.text,
 								localWorkflowToggles,
@@ -4355,6 +4357,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								exportAllSessionsCommandOpened = true
 								await vscode.commands.executeCommand(getCommand("exportAllSessions"))
 							}
+
+							if (exportAllDialogsRequested && !exportAllDialogsCommandOpened) {
+								exportAllDialogsCommandOpened = true
+								await vscode.commands.executeCommand(getCommand("exportAllDialogs"))
+							}
 							// kilocode_change end
 
 							if (needsCheck) {
@@ -4365,7 +4372,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								...block,
 								text: exportAllSessionsRequested
 									? `${processedText}\nExport all sessions command has been opened.`
-									: processedText,
+									: exportAllDialogsRequested
+										? `${processedText}\nExport all dialogs command has been opened.`
+										: processedText,
 							}
 						}
 					}

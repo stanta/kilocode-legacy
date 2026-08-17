@@ -62,6 +62,7 @@ export const commandIds = [
 	"exportSettings", // kilocode_change
 	"exportDialogHistory", // kilocode_change
 	"exportAllSessions", // kilocode_change
+	"exportAllDialogs", // kilocode_change
 	"generateTerminalCommand", // kilocode_change
 	"handleExternalUri", // kilocode_change - for JetBrains plugin URL forwarding
 	"focusPanel",

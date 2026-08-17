@@ -40,6 +40,16 @@ describe("Slash Command Matching", () => {
 			const results = getMatchingSlashCommands("init")
 			expect(results.some((r) => r.name === "init")).toBe(true)
 		})
+
+		it("should include export_all_dialogs in results", () => {
+			const results = getMatchingSlashCommands("export_all_dialogs")
+			const command = results.find((r) => r.name === "export_all_dialogs")
+
+			expect(command).toMatchObject({
+				name: "export_all_dialogs",
+				description: "Export text-only dialogs for the current project",
+			})
+		})
 	})
 
 	describe("validateSlashCommand - case insensitivity", () => {
@@ -58,6 +68,10 @@ describe("Slash Command Matching", () => {
 		it("should validate init", () => {
 			expect(validateSlashCommand("init")).toBe("full")
 			expect(validateSlashCommand("INIT")).toBe("full")
+		})
+
+		it("should validate export_all_dialogs", () => {
+			expect(validateSlashCommand("export_all_dialogs")).toBe("full")
 		})
 
 		it("should validate partial matches regardless of case", () => {

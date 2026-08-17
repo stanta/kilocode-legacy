@@ -14,6 +14,7 @@ export interface KiloSlashCommandResult {
 	processedText: string
 	needsRulesFileCheck: boolean
 	exportAllSessionsRequested?: boolean
+	exportAllDialogsRequested?: boolean
 }
 
 function enabledWorkflowToggles(workflowToggles: ClineRulesToggles) {
@@ -62,6 +63,14 @@ export async function parseKiloSlashCommands(
 				processedText: textWithoutSlashCommand,
 				needsRulesFileCheck: false,
 				exportAllSessionsRequested: true,
+			}
+		}
+
+		if (commandName === "export_all_dialogs") {
+			return {
+				processedText: textWithoutSlashCommand,
+				needsRulesFileCheck: false,
+				exportAllDialogsRequested: true,
 			}
 		}
 		// kilocode_change end

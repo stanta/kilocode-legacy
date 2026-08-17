@@ -36,6 +36,7 @@ export function getSupportedSlashCommands(
 		{ name: "compact", description: "Condenses your current context window" },
 		{ name: "session", description: "Session management <fork|share|show>" },
 		{ name: "export_all_sessions", description: "Export all sessions and task history" },
+		{ name: "export_all_dialogs", description: "Export text-only dialogs for the current project" },
 		// kilocode_change end
 	]
 
