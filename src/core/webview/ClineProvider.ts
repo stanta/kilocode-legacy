@@ -49,6 +49,7 @@ import {
 	DEFAULT_MODES,
 	DEFAULT_CHECKPOINT_TIMEOUT_SECONDS,
 	getModelId,
+	withModelId, // kilocode_change
 } from "@roo-code/types"
 import { aggregateTaskCostsRecursive, type AggregatedCosts } from "./aggregateTaskCosts"
 import { TelemetryService } from "@roo-code/telemetry"
@@ -2239,22 +2240,50 @@ export class ClineProvider
 
 	// kilocode_change start
 	async handleKiloCodeCallback(token: string) {
-		const kilocode: ProviderName = "kilocode"
-		let { apiConfiguration, currentApiConfigName = "default" } = await this.getState()
+		const { apiConfiguration, currentApiConfigName = "default" } = await this.getState()
+		const currentTask = this.getCurrentTask()
+		const sessionConfiguration = currentTask ? this.getTaskSessionApiConfiguration(currentTask) : undefined
+		// kilocode_change start - a Kilo Code session's model must not be selected through generic key ordering
+		const previousSessionModel =
+			sessionConfiguration?.apiProvider === "kilocode"
+				? sessionConfiguration.kilocodeModel
+				: sessionConfiguration
+					? getModelId(sessionConfiguration)
+					: undefined
+		// kilocode_change end
+		const configuredKiloCodeModel = apiConfiguration.kilocodeModel
+		const canRetainPreviousSessionModel =
+			sessionConfiguration?.apiProvider === "kilocode" &&
+			previousSessionModel !== undefined &&
+			previousSessionModel === sessionConfiguration.kilocodeModel
+		const kilocodeModel =
+			(canRetainPreviousSessionModel
+				? previousSessionModel
+				: (configuredKiloCodeModel ?? previousSessionModel)) ??
+			(await getKilocodeDefaultModel(token, apiConfiguration.kilocodeOrganizationId)).defaultModel
 
-		await this.upsertProviderProfile(currentApiConfigName, {
-			...apiConfiguration,
-			apiProvider: "kilocode",
-			kilocodeToken: token,
-		})
+		const migrateToKiloCode = (configuration: ProviderSettings): ProviderSettings => {
+			const migration = withModelId(
+				{
+					...configuration,
+					apiProvider: "kilocode",
+					kilocodeToken: token,
+				},
+				kilocodeModel,
+			)
+			if (!migration.ok) {
+				throw new Error(`Unable to select Kilo Code model '${kilocodeModel}': ${migration.error}`)
+			}
+			return migration.settings
+		}
+
+		await this.upsertProviderProfile(currentApiConfigName, migrateToKiloCode(apiConfiguration))
 
 		vscode.window.showInformationMessage("Kilo Code successfully configured!")
 
-		if (this.getCurrentTask()) {
-			this.getCurrentTask()!.api = buildApiHandler({
-				apiProvider: kilocode,
-				kilocodeToken: token,
-			})
+		if (currentTask && sessionConfiguration) {
+			// Task.updateApiConfiguration atomically rebuilds the handler and session runtime binding.
+			currentTask.updateApiConfiguration(migrateToKiloCode(sessionConfiguration))
 		}
 	}
 	// kilocode_change end

@@ -94,4 +94,101 @@ describe("ClineProvider", () => {
 			)
 		})
 	})
+
+	describe("Kilo Code re-authentication", () => {
+		const createSessionTask = (initialConfiguration: Record<string, unknown>) => {
+			let sessionConfiguration = { ...initialConfiguration }
+			let runtimeConfiguration = { ...initialConfiguration }
+			let api = {
+				getModel: vi.fn(() => ({ id: sessionConfiguration.kilocodeModel })),
+			}
+			const task: any = {
+				apiConfiguration: { ...initialConfiguration },
+				getSessionApiConfiguration: vi.fn(() => ({ ...sessionConfiguration })),
+				getSessionRuntimeConfig: vi.fn(() => ({
+					currentMode: "code",
+					activeProvider: runtimeConfiguration.apiProvider,
+					activeModelId: runtimeConfiguration.kilocodeModel,
+					modeBindings: {
+						code: { apiConfiguration: { ...runtimeConfiguration } },
+					},
+				})),
+				api,
+			}
+			task.updateApiConfiguration = vi.fn((configuration) => {
+				task.apiConfiguration = { ...configuration }
+				sessionConfiguration = { ...configuration }
+				runtimeConfiguration = { ...configuration }
+				api = { getModel: vi.fn(() => ({ id: sessionConfiguration.kilocodeModel })) }
+				task.api = api
+			})
+			return task
+		}
+
+		test("preserves an existing Kilo Code task model across re-authentication", async () => {
+			const task = createSessionTask({
+				apiProvider: "kilocode",
+				kilocodeModel: "model-A",
+				apiModelId: "stale-model-B",
+				kilocodeOrganizationId: "org-A",
+				kilocodeReasoningEffort: "high",
+				toolProtocol: "native",
+			})
+			const originalApi = task.api
+			;(provider as any).getCurrentTask = vi.fn().mockReturnValue(task)
+			;(provider as any).getState = vi.fn().mockResolvedValue({
+				apiConfiguration: { apiProvider: "kilocode", kilocodeModel: "sidebar-model" },
+				currentApiConfigName: "default",
+			})
+			;(provider as any).upsertProviderProfile = vi.fn().mockResolvedValue(undefined)
+
+			await provider.handleKiloCodeCallback("new-token")
+
+			expect(task.updateApiConfiguration).toHaveBeenCalledWith(
+				expect.objectContaining({ apiProvider: "kilocode", kilocodeModel: "model-A" }),
+			)
+			expect(task.api).not.toBe(originalApi)
+			expect(task.api.getModel().id).toBe("model-A")
+			expect(task.apiConfiguration).toMatchObject({
+				apiProvider: "kilocode",
+				kilocodeModel: "model-A",
+				kilocodeToken: "new-token",
+				kilocodeOrganizationId: "org-A",
+			})
+			expect(task.apiConfiguration.apiModelId).toBeUndefined()
+			expect(task.getSessionApiConfiguration()).toEqual(task.apiConfiguration)
+			expect(task.getSessionRuntimeConfig().activeModelId).toBe("model-A")
+			expect(task.getSessionRuntimeConfig().modeBindings.code.apiConfiguration).toEqual(task.apiConfiguration)
+		})
+
+		test("migrates a non-Kilo Code task to the configured Kilo Code model without stale model fields", async () => {
+			const task = createSessionTask({
+				apiProvider: "openrouter",
+				openRouterModelId: "openrouter-session-model",
+				toolProtocol: "native",
+			})
+			;(provider as any).getCurrentTask = vi.fn().mockReturnValue(task)
+			;(provider as any).getState = vi.fn().mockResolvedValue({
+				apiConfiguration: {
+					apiProvider: "kilocode",
+					kilocodeModel: "configured-kilo-model",
+					openRouterModelId: "stale-sidebar-model",
+				},
+				currentApiConfigName: "default",
+			})
+			;(provider as any).upsertProviderProfile = vi.fn().mockResolvedValue(undefined)
+
+			await provider.handleKiloCodeCallback("new-token")
+
+			expect(task.api.getModel().id).toBe("configured-kilo-model")
+			expect(task.apiConfiguration).toMatchObject({
+				apiProvider: "kilocode",
+				kilocodeModel: "configured-kilo-model",
+				kilocodeToken: "new-token",
+			})
+			expect(task.apiConfiguration.openRouterModelId).toBeUndefined()
+			expect(task.getSessionRuntimeConfig().activeModelId).toBe("configured-kilo-model")
+			expect(task.getSessionRuntimeConfig().modeBindings.code.apiConfiguration).toEqual(task.apiConfiguration)
+		})
+	})
 })

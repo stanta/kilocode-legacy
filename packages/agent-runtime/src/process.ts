@@ -103,6 +103,7 @@ interface AgentConfig {
 			title: string
 			createdAt: string
 			mode: string | null
+			model: string | null // kilocode_change
 		}
 	}
 	// kilocode_change start
@@ -119,6 +120,7 @@ interface SessionMetadata {
 	title: string
 	createdAt: string
 	mode: string | null
+	model: string | null // kilocode_change
 }
 
 /**

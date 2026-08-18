@@ -220,7 +220,7 @@ export class ExtensionHost extends EventEmitter {
 		sessionId: string
 		uiMessages: unknown[]
 		apiConversationHistory: unknown[]
-		metadata: { sessionId: string; title: string; createdAt: string; mode: string | null }
+		metadata: { sessionId: string; title: string; createdAt: string; mode: string | null; model: string | null } // kilocode_change
 	}): Promise<ExtensionAPI> {
 		if (this.isActivated) {
 			return this.getAPI()
@@ -1277,7 +1277,7 @@ export class ExtensionHost extends EventEmitter {
 		sessionId: string
 		uiMessages: unknown[]
 		apiConversationHistory: unknown[]
-		metadata: { sessionId: string; title: string; createdAt: string; mode: string | null }
+		metadata: { sessionId: string; title: string; createdAt: string; mode: string | null; model: string | null } // kilocode_change
 	}): Promise<void> {
 		logs.info("Pre-seeding task history for resume", "ExtensionHost", {
 			sessionId: resumeData.sessionId,

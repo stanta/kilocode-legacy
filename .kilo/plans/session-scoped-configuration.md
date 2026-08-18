@@ -139,19 +139,19 @@ async switchTaskProviderProfile(taskId: string, profileName: string): Promise<vo
   if (!task) return
 
   const profile = await this.providerSettingsManager.getProfile({ name: profileName })
-  
+
   // Update ONLY this task
   task.updateSessionConfig({
     apiConfiguration: profile,
     apiConfigName: profileName,
   })
-  
+
   // Rebuild task's API handler
   task.api = buildApiHandler(profile)
-  
+
   // Persist to history
   await this.updateTaskHistoryWithSessionConfig(task.taskId, task.sessionConfig)
-  
+
   // Notify webview for THIS task only
   await this.postTaskStateToWebview(task.taskId)
 }
@@ -206,13 +206,13 @@ async switchTaskMode(taskId: string, newMode: Mode): Promise<void> {
 
   // Update task's mode
   task._taskMode = newMode
-  
+
   // Update session config
   task.updateSessionConfig({ mode: newMode })
-  
+
   // Persist to history
   await this.updateTaskHistoryWithSessionConfig(task.taskId, task.sessionConfig)
-  
+
   // If mode has associated provider profile, apply it to THIS task only
   const savedConfigId = await this.providerSettingsManager.getModeConfigId(newMode)
   if (savedConfigId) {
@@ -221,7 +221,7 @@ async switchTaskMode(taskId: string, newMode: Mode): Promise<void> {
       await this.switchTaskProviderProfile(taskId, profile.name)
     }
   }
-  
+
   // Notify webview
   await this.postTaskStateToWebview(task.taskId)
 }
@@ -270,7 +270,7 @@ Add method:
 getFilteredMcpHub(): McpHub | undefined {
   const hub = this.providerRef.deref()?.getMcpHub()
   if (!hub) return undefined
-  
+
   // Return a wrapper that filters servers by sessionConfig.mcpServerNames
   return new FilteredMcpHub(hub, this.sessionConfig.mcpServerNames)
 }
@@ -284,11 +284,11 @@ class FilteredMcpHub {
     private hub: McpHub,
     private allowedServers: string[]
   ) {}
-  
+
   getServers() {
     return this.hub.getServers().filter(s => this.allowedServers.includes(s.name))
   }
-  
+
   // Delegate other methods with filtering...
   callTool(serverName: string, toolName: string, args: any) {
     if (!this.allowedServers.includes(serverName)) {
@@ -324,12 +324,12 @@ case "toggleSessionMcpServer": {
   const { serverName, enabled, taskId } = message
   const task = provider.findTask(taskId ?? provider.getCurrentTask()?.taskId)
   if (!task) break
-  
+
   const current = task.sessionConfig.mcpServerNames
   const updated = enabled
     ? [...current, serverName]
     : current.filter(n => n !== serverName)
-  
+
   task.updateSessionConfig({ mcpServerNames: updated })
   await provider.updateTaskHistoryWithSessionConfig(task.taskId, task.sessionConfig)
   break
@@ -361,14 +361,14 @@ export function getSkillsSection(
   skillOverrides?: string[]  // NEW parameter
 ): string {
   if (!skillsManager) return ""
-  
+
   let skills = skillsManager.getSkillsForMode(mode)
-  
+
   // Apply task-level filter if set
   if (skillOverrides && skillOverrides.length > 0) {
     skills = skills.filter(s => skillOverrides!.includes(s.name))
   }
-  
+
   // ... rest of existing logic
 }
 ```
@@ -397,7 +397,7 @@ case "setSessionSkillOverrides": {
   const { skillNames, taskId } = message
   const task = provider.findTask(taskId ?? provider.getCurrentTask()?.taskId)
   if (!task) break
-  
+
   task.updateSessionConfig({ skillOverrides: skillNames })
   await provider.updateTaskHistoryWithSessionConfig(task.taskId, task.sessionConfig)
   break
@@ -414,7 +414,7 @@ Modify `getStateToPostToWebview()`:
 ```typescript
 async getStateToPostToWebview() {
   const task = this.getCurrentTask()
-  
+
   return {
     // Global defaults (for settings UI, new task defaults)
     globalDefaults: {
@@ -423,7 +423,7 @@ async getStateToPostToWebview() {
       mode: this.contextProxy.getValue("mode"),
       listApiConfigMeta: await this.providerSettingsManager.listConfig(),
     },
-    
+
     // Active session (for current task UI)
     activeSession: task ? {
       taskId: task.taskId,
@@ -433,7 +433,7 @@ async getStateToPostToWebview() {
       mcpServerNames: task.sessionConfig.mcpServerNames,
       skillOverrides: task.sessionConfig.skillOverrides,
     } : null,
-    
+
     // ... other state
   }
 }
@@ -486,39 +486,39 @@ describe("Session-scoped configuration", () => {
     // Switch task A to provider Z
     // Assert: task A has Z, task B still has Y
   })
-  
+
   it("two tasks maintain independent mode", async () => {
     // Create task A in mode "code"
     // Create task B in mode "architect"
     // Switch task A to "debug"
     // Assert: task A is "debug", task B is still "architect"
   })
-  
+
   it("MCP server filter is per-task", async () => {
     // Task A enables server "github"
     // Task B disables server "github"
     // Assert: task A sees github tools, task B does not
   })
-  
+
   it("skill overrides are per-task", async () => {
     // Task A has skillOverrides: ["skill-x"]
     // Task B has skillOverrides: undefined (all skills)
     // Assert: task A system prompt only mentions skill-x
     // Assert: task B system prompt mentions all skills
   })
-  
+
   it("new task gets global defaults", async () => {
     // Set global default to provider X, mode "code"
     // Create new task
     // Assert: task.sessionConfig matches global defaults
   })
-  
+
   it("changing global defaults does not affect existing tasks", async () => {
     // Create task A
     // Change global default to provider Y
     // Assert: task A still has original provider
   })
-  
+
   it("task history restores session config", async () => {
     // Create task with specific config
     // Close task

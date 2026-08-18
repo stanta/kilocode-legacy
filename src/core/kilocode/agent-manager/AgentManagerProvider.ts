@@ -793,7 +793,13 @@ export class AgentManagerProvider implements vscode.Disposable {
 			sessionData?: {
 				uiMessages: ClineMessage[]
 				apiConversationHistory: unknown[]
-				metadata: { sessionId: string; title: string; createdAt: string; mode: string | null }
+				metadata: {
+					sessionId: string
+					title: string
+					createdAt: string
+					mode: string | null
+					model: string | null // kilocode_change
+				}
 			} // For resuming with history
 		},
 		onSetupFailed?: () => void,
@@ -1433,7 +1439,13 @@ export class AgentManagerProvider implements vscode.Disposable {
 			| {
 					uiMessages: ClineMessage[]
 					apiConversationHistory: unknown[]
-					metadata: { sessionId: string; title: string; createdAt: string; mode: string | null }
+					metadata: {
+						sessionId: string
+						title: string
+						createdAt: string
+						mode: string | null
+						model: string | null // kilocode_change
+					}
 			  }
 			| undefined
 		try {
@@ -1458,6 +1470,17 @@ export class AgentManagerProvider implements vscode.Disposable {
 			this.outputChannel.appendLine(`[AgentManager] Resuming with mode: ${resumeMode}`)
 		}
 
+		// kilocode_change start - cloud metadata is authoritative for remote and synced sessions
+		const resumeModel = sessionData?.metadata.model ?? session?.model
+		if (resumeModel) {
+			this.outputChannel.appendLine(`[AgentManager] Resuming with model: ${resumeModel}`)
+		} else if (sessionData) {
+			this.outputChannel.appendLine(
+				`[AgentManager] Resuming legacy remote session ${sessionId} without last_model metadata`,
+			)
+		}
+		// kilocode_change end
+
 		// Handle local session with parallel mode
 		if (session?.parallelMode?.enabled && session.parallelMode.branch) {
 			const worktreeInfo = await this.prepareWorktreeForResume(session)
@@ -1470,7 +1493,7 @@ export class AgentManagerProvider implements vscode.Disposable {
 					effectiveWorkspace: worktreeInfo.path,
 					images,
 					sessionData,
-					model: session.model,
+					model: resumeModel,
 					mode: resumeMode ?? undefined,
 				})
 				return
@@ -1487,7 +1510,7 @@ export class AgentManagerProvider implements vscode.Disposable {
 			gitUrl: session?.gitUrl,
 			images,
 			sessionData,
-			model: session?.model,
+			model: resumeModel,
 			mode: resumeMode ?? undefined,
 		})
 	}

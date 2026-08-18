@@ -781,6 +781,57 @@ export const getModelId = (settings: ProviderSettings): string | undefined => {
 	return modelIdKey ? settings[modelIdKey] : undefined
 }
 
+// kilocode_change start - agent manager must keep model overrides session-local
+export type ModelIdOverrideResult =
+	| { ok: true; settings: ProviderSettings; modelIdKey: ModelIdKey }
+	| { ok: false; error: string }
+
+/**
+ * Returns an independent provider-settings snapshot with one explicit model ID.
+ *
+ * Model selection is provider-specific. Clearing other model fields is deliberate:
+ * `getModelId()` reads the first populated field, so retaining a stale field would
+ * make a selected model resolve differently from the serialized session config.
+ */
+export const withModelId = (settings: ProviderSettings, modelId: string): ModelIdOverrideResult => {
+	const provider = settings.apiProvider
+	if (!provider) {
+		return { ok: false, error: "Cannot override a model without an API provider" }
+	}
+
+	if (isInternalProvider(provider)) {
+		return {
+			ok: false,
+			error: `Provider '${provider}' does not support scalar model overrides in Agent Manager`,
+		}
+	}
+
+	const modelIdKey = isTypicalProvider(provider)
+		? modelIdKeysByProvider[provider]
+		: isCustomProvider(provider) || isFauxProvider(provider)
+			? "apiModelId"
+			: undefined
+
+	if (!modelIdKey) {
+		return { ok: false, error: `Provider '${provider}' does not support model overrides` }
+	}
+
+	const overridden = { ...settings } as ProviderSettings
+	for (const key of modelIdKeys) {
+		if (key !== modelIdKey) {
+			delete overridden[key]
+		}
+	}
+	overridden[modelIdKey] = modelId
+
+	if (getModelId(overridden) !== modelId) {
+		return { ok: false, error: `Provider '${provider}' did not retain the requested model '${modelId}'` }
+	}
+
+	return { ok: true, settings: overridden, modelIdKey }
+}
+// kilocode_change end
+
 /**
  * TypicalProvider
  */

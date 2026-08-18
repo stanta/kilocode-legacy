@@ -195,7 +195,7 @@ Parent task → child task передача конфигурации.
 - Откуда берётся default provider при создании новой задачи?
 - Откуда берётся default mode?
 
-**Рекомендация**: 
+**Рекомендация**:
 - Provider: из `ContextProxy.getValue("currentApiConfigName")` (остаётся глобальным)
 - Mode: из `ContextProxy.getValue("mode")` (остаётся глобальным)
 - При создании задачи снимается snapshot, дальше задача живёт независимо

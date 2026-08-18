@@ -13,6 +13,7 @@ export interface SessionMetadata {
 	title: string
 	createdAt: string
 	mode: string | null
+	model: string | null // kilocode_change
 }
 
 /**
@@ -98,6 +99,7 @@ export class RemoteSessionService {
 			title: string
 			created_at: string
 			last_mode: string | null
+			last_model?: string | null // kilocode_change
 			ui_messages_blob_url?: string | null
 			api_conversation_history_blob_url?: string | null
 		}
@@ -124,6 +126,7 @@ export class RemoteSessionService {
 				title: sessionWithUrls.title,
 				createdAt: sessionWithUrls.created_at,
 				mode: sessionWithUrls.last_mode,
+				model: sessionWithUrls.last_model ?? null, // kilocode_change
 			},
 		}
 	}
