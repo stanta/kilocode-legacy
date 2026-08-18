@@ -2,7 +2,7 @@
 import fs from "fs/promises"
 import path from "path"
 
-import type { HistoryItem } from "@roo-code/types"
+import type { HistoryItem, SessionRuntimeConfig, SessionRuntimeModeBinding } from "@roo-code/types"
 
 import { GlobalFileNames } from "../../shared/globalFileNames"
 import { getDialogSessionStoragePaths } from "../../utils/storage"
@@ -68,6 +68,16 @@ type MessageHistoryFile = "uiMessages" | "apiConversationHistory"
 
 type MessageCountResult = Partial<Record<MessageHistoryFile, number>>
 
+type SanitizedSessionRuntimeModeBinding = Omit<SessionRuntimeModeBinding, "apiConfiguration">
+
+type SanitizedSessionRuntimeConfig = Omit<SessionRuntimeConfig, "modeBindings"> & {
+	modeBindings?: Record<string, SanitizedSessionRuntimeModeBinding>
+}
+
+type SanitizedHistoryItem = Omit<HistoryItem, "sessionRuntimeConfig"> & {
+	sessionRuntimeConfig?: SanitizedSessionRuntimeConfig
+}
+
 interface MessageCountComparison {
 	shouldRefresh: boolean
 	warnings: string[]
@@ -116,8 +126,9 @@ export async function exportAllSessions(
 		a.localeCompare(b),
 	)
 	const historyByTaskId = new Map(currentProjectHistory.map((item) => [item.id, item]))
+	const sanitizedHistory = currentProjectHistory.map(sanitizeHistoryItem)
 
-	await fileSystem.writeFile(taskHistoryPath, JSON.stringify(currentProjectHistory, null, 2), "utf8")
+	await fileSystem.writeFile(taskHistoryPath, JSON.stringify(sanitizedHistory, null, 2), "utf8")
 
 	const taskDirectories = new Set(await readTaskDirectories(fileSystem, sourceTasksDir))
 
@@ -214,6 +225,31 @@ export async function exportAllSessions(
 	)
 
 	return result
+}
+
+function sanitizeHistoryItem(item: HistoryItem): SanitizedHistoryItem {
+	const { sessionRuntimeConfig, ...historyItem } = item
+
+	if (!sessionRuntimeConfig) {
+		return historyItem
+	}
+
+	const modeBindings = sessionRuntimeConfig.modeBindings
+		? Object.fromEntries(
+				Object.entries(sessionRuntimeConfig.modeBindings).map(([mode, binding]) => {
+					const { apiConfiguration: _apiConfiguration, ...safeBinding } = binding
+					return [mode, safeBinding]
+				}),
+			)
+		: undefined
+
+	return {
+		...historyItem,
+		sessionRuntimeConfig: {
+			...sessionRuntimeConfig,
+			modeBindings,
+		},
+	}
 }
 
 async function directoryExists(fileSystem: FileSystemAdapter, dirPath: string): Promise<boolean> {

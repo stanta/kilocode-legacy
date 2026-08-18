@@ -232,6 +232,57 @@ describe("exportAllSessions", () => {
 		})
 	})
 
+	it("omits session API credentials from exported task history", async () => {
+		const fileSystem = new MemoryFs()
+		const secretApiKey = "test-openrouter-api-key"
+		const secretToken = "test-kilocode-token"
+		const historyItem = createHistoryItem({
+			id: "task-1",
+			sessionRuntimeConfig: {
+				version: 1,
+				currentMode: "code",
+				modeBindings: {
+					code: {
+						mode: "code",
+						apiConfigName: "private-profile",
+						apiConfiguration: {
+							apiProvider: "openrouter",
+							openRouterApiKey: secretApiKey,
+							kilocodeToken: secretToken,
+						},
+						provider: "openrouter",
+						modelId: "openai/gpt-5",
+						updatedAt: Date.now(),
+					},
+				},
+			} as HistoryItem["sessionRuntimeConfig"],
+		})
+		fileSystem.addFile("/global-storage/tasks/task-1/api_conversation_history.json", "[]")
+
+		const result = await exportAllSessions(createProvider([historyItem]), {
+			fs: fileSystem,
+			outputDir,
+			getDialogSessionStoragePaths: async (defaultPath) => ({
+				basePath: defaultPath,
+				tasksDir: `${defaultPath}/tasks`,
+				isProjectLocal: false,
+			}),
+		})
+
+		const exportedHistory = fileSystem.files.get(result.taskHistoryPath)!
+		const exportedRuntime = JSON.parse(exportedHistory)[0].sessionRuntimeConfig
+		expect(exportedRuntime.modeBindings.code).toMatchObject({
+			mode: "code",
+			apiConfigName: "private-profile",
+			provider: "openrouter",
+			modelId: "openai/gpt-5",
+		})
+		expect(exportedRuntime.modeBindings.code).not.toHaveProperty("apiConfiguration")
+		expect(exportedHistory).not.toContain("apiConfiguration")
+		expect(exportedHistory).not.toContain(secretApiKey)
+		expect(exportedHistory).not.toContain(secretToken)
+	})
+
 	it("exports raw task directories from project-local dialog session storage", async () => {
 		const fileSystem = new MemoryFs()
 		const provider = createProvider([createHistoryItem({ id: "task-1" })])
