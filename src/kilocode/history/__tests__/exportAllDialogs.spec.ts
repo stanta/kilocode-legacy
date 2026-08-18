@@ -142,9 +142,11 @@ const createProvider = (history: HistoryItem[], cwd = "/workspace"): AllDialogsE
 	getTaskHistory: () => history,
 })
 
-describe("exportAllDialogs", () => {
-	const outputDir = "/selected/export"
+const outputDir = "/selected/export"
+const exportedDialogPath = (taskId: string, prefix = "01-01-1970_00-00"): string =>
+	path.join(outputDir, "dialogs", `${prefix}_${taskId}.md`)
 
+describe("exportAllDialogs", () => {
 	it("requires an explicit output directory", async () => {
 		await expect(exportAllDialogs(createProvider([]), { fs: new MemoryFs() })).rejects.toThrow(
 			"An output directory is required",
@@ -155,7 +157,7 @@ describe("exportAllDialogs", () => {
 		const fileSystem = new MemoryFs()
 		fileSystem.addFile(
 			"/global-storage/tasks/task-1/ui_messages.json",
-			JSON.stringify([{ type: "say", say: "text", text: "Current" }]),
+			JSON.stringify([{ ts: Date.UTC(2026, 7, 17, 14, 54), type: "say", say: "text", text: "Current" }]),
 		)
 		fileSystem.addFile(
 			"/global-storage/tasks/task-2/ui_messages.json",
@@ -175,7 +177,7 @@ describe("exportAllDialogs", () => {
 		)
 
 		expect(result).toMatchObject({ total: 1, exported: 1, refreshed: 0, skipped: 0, failed: [], warnings: [] })
-		expect(fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))).toContain("Current")
+		expect(fileSystem.files.get(exportedDialogPath("task-1", "17-08-2026_14-54"))).toContain("Current")
 		expect(fileSystem.files.has(path.join(outputDir, "dialogs", "task-2.md"))).toBe(false)
 		expect(fileSystem.files.has(path.join(outputDir, "dialogs", "orphan.md"))).toBe(false)
 		expect(JSON.parse(fileSystem.files.get(result.taskHistoryPath)!)).toHaveLength(1)
@@ -194,7 +196,23 @@ describe("exportAllDialogs", () => {
 		)
 
 		expect(result).toMatchObject({ total: 1, exported: 1, refreshed: 0, skipped: 0, failed: [], warnings: [] })
-		expect(fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))).toContain("Trailing slash")
+		expect(fileSystem.files.get(exportedDialogPath("task-1"))).toContain("Trailing slash")
+	})
+
+	it("uses history timestamp fallback in Markdown filenames", async () => {
+		const fileSystem = new MemoryFs()
+		fileSystem.addFile(
+			"/global-storage/tasks/task-1/ui_messages.json",
+			JSON.stringify([{ type: "say", say: "text", text: "Fallback", ts: "not numeric" }]),
+		)
+
+		const result = await exportAllDialogs(
+			createProvider([createHistoryItem({ id: "task-1", ts: Date.UTC(2026, 0, 2, 3, 4) })]),
+			{ fs: fileSystem, outputDir, getStorageBasePath: async (defaultPath) => defaultPath },
+		)
+
+		expect(result).toMatchObject({ total: 1, exported: 1, refreshed: 0, skipped: 0, failed: [], warnings: [] })
+		expect(fileSystem.files.get(exportedDialogPath("task-1", "02-01-2026_03-04"))).toContain("Fallback")
 	})
 
 	it("uses adapter realpath values for workspace canonicalization when available", async () => {
@@ -212,7 +230,7 @@ describe("exportAllDialogs", () => {
 		)
 
 		expect(result).toMatchObject({ total: 1, exported: 1, refreshed: 0, skipped: 0, failed: [], warnings: [] })
-		expect(fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))).toContain("Canonical")
+		expect(fileSystem.files.get(exportedDialogPath("task-1"))).toContain("Canonical")
 	})
 
 	it("writes sanitized task history without credential-bearing runtime config", async () => {
@@ -288,7 +306,7 @@ describe("exportAllDialogs", () => {
 			getStorageBasePath: async (defaultPath) => defaultPath,
 		})
 
-		const markdown = fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))!
+		const markdown = fileSystem.files.get(exportedDialogPath("task-1"))!
 		expect(markdown).toContain("messageCount: 9")
 		expect(markdown).toMatch(/^contentHash: "[a-f0-9]{64}"$/m)
 		expect(markdown).toContain("Visible user task")
@@ -324,7 +342,7 @@ describe("exportAllDialogs", () => {
 			outputDir,
 			getStorageBasePath: async (defaultPath) => defaultPath,
 		})
-		const firstMarkdown = fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))!
+		const firstMarkdown = fileSystem.files.get(exportedDialogPath("task-1"))!
 
 		const result = await exportAllDialogs(createProvider([createHistoryItem({ id: "task-1" })]), {
 			fs: fileSystem,
@@ -334,7 +352,7 @@ describe("exportAllDialogs", () => {
 
 		expect(firstResult).toMatchObject({ total: 1, exported: 1, refreshed: 0, skipped: 0, failed: [], warnings: [] })
 		expect(result).toMatchObject({ total: 1, exported: 0, refreshed: 0, skipped: 1, failed: [], warnings: [] })
-		expect(fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))).toBe(firstMarkdown)
+		expect(fileSystem.files.get(exportedDialogPath("task-1"))).toBe(firstMarkdown)
 	})
 
 	it("refreshes existing markdown when extracted source message count differs", async () => {
@@ -346,7 +364,7 @@ describe("exportAllDialogs", () => {
 				{ type: "say", say: "completion_result", text: "Completion" },
 			]),
 		)
-		fileSystem.addFile(path.join(outputDir, "dialogs", "task-1.md"), "---\nmessageCount: 1\n---\n\nOld")
+		fileSystem.addFile(exportedDialogPath("task-1"), "---\nmessageCount: 1\n---\n\nOld")
 
 		const result = await exportAllDialogs(createProvider([createHistoryItem({ id: "task-1" })]), {
 			fs: fileSystem,
@@ -361,11 +379,9 @@ describe("exportAllDialogs", () => {
 				warning: expect.stringContaining("Cannot parse existing contentHash"),
 			},
 		])
-		expect(fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))).toContain("New text")
-		expect(fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))).toContain("messageCount: 2")
-		expect(fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))).toMatch(
-			/^contentHash: "[a-f0-9]{64}"$/m,
-		)
+		expect(fileSystem.files.get(exportedDialogPath("task-1"))).toContain("New text")
+		expect(fileSystem.files.get(exportedDialogPath("task-1"))).toContain("messageCount: 2")
+		expect(fileSystem.files.get(exportedDialogPath("task-1"))).toMatch(/^contentHash: "[a-f0-9]{64}"$/m)
 	})
 
 	it("refreshes existing markdown when message count matches but content hash differs", async () => {
@@ -375,7 +391,7 @@ describe("exportAllDialogs", () => {
 			JSON.stringify([{ type: "say", say: "text", text: "Changed text" }]),
 		)
 		fileSystem.addFile(
-			path.join(outputDir, "dialogs", "task-1.md"),
+			exportedDialogPath("task-1"),
 			`---\nmessageCount: 1\ncontentHash: "${"0".repeat(64)}"\n---\n\nOld`,
 		)
 
@@ -386,10 +402,8 @@ describe("exportAllDialogs", () => {
 		})
 
 		expect(result).toMatchObject({ total: 1, exported: 0, refreshed: 1, skipped: 0, failed: [], warnings: [] })
-		expect(fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))).toContain("Changed text")
-		expect(fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))).toMatch(
-			/^contentHash: "[a-f0-9]{64}"$/m,
-		)
+		expect(fileSystem.files.get(exportedDialogPath("task-1"))).toContain("Changed text")
+		expect(fileSystem.files.get(exportedDialogPath("task-1"))).toMatch(/^contentHash: "[a-f0-9]{64}"$/m)
 	})
 
 	it("refreshes older existing markdown that has message count but no content hash", async () => {
@@ -398,7 +412,7 @@ describe("exportAllDialogs", () => {
 			"/global-storage/tasks/task-1/ui_messages.json",
 			JSON.stringify([{ type: "say", say: "text", text: "Same count" }]),
 		)
-		fileSystem.addFile(path.join(outputDir, "dialogs", "task-1.md"), "---\nmessageCount: 1\n---\n\nOld")
+		fileSystem.addFile(exportedDialogPath("task-1"), "---\nmessageCount: 1\n---\n\nOld")
 
 		const result = await exportAllDialogs(createProvider([createHistoryItem({ id: "task-1" })]), {
 			fs: fileSystem,
@@ -413,10 +427,8 @@ describe("exportAllDialogs", () => {
 				warning: expect.stringContaining("Cannot parse existing contentHash"),
 			},
 		])
-		expect(fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))).toContain("Same count")
-		expect(fileSystem.files.get(path.join(outputDir, "dialogs", "task-1.md"))).toMatch(
-			/^contentHash: "[a-f0-9]{64}"$/m,
-		)
+		expect(fileSystem.files.get(exportedDialogPath("task-1"))).toContain("Same count")
+		expect(fileSystem.files.get(exportedDialogPath("task-1"))).toMatch(/^contentHash: "[a-f0-9]{64}"$/m)
 	})
 
 	it("refreshes existing markdown with a warning when existing message count is not parseable", async () => {
@@ -425,7 +437,7 @@ describe("exportAllDialogs", () => {
 			"/global-storage/tasks/task-1/ui_messages.json",
 			JSON.stringify([{ type: "say", say: "text", text: "New" }]),
 		)
-		fileSystem.addFile(path.join(outputDir, "dialogs", "task-1.md"), "No frontmatter")
+		fileSystem.addFile(exportedDialogPath("task-1"), "No frontmatter")
 
 		const result = await exportAllDialogs(createProvider([createHistoryItem({ id: "task-1" })]), {
 			fs: fileSystem,

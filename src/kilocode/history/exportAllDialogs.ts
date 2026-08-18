@@ -7,6 +7,7 @@ import type { HistoryItem } from "@roo-code/types"
 
 import { GlobalFileNames } from "../../shared/globalFileNames"
 import { getStorageBasePath } from "../../utils/storage"
+import { getExportDatePrefix, getSafeTaskId } from "./exportNames"
 
 export interface AllDialogsExportProvider {
 	cwd: string
@@ -156,12 +157,18 @@ export async function exportAllDialogs(
 		const historyItem = historyByTaskId.get(taskId)
 		const sourceTaskDir = path.join(sourceTasksDir, taskId)
 		const uiMessagesPath = path.join(sourceTaskDir, GlobalFileNames.uiMessages)
-		const outputPath = path.join(dialogsDir, `${safeTaskId(taskId)}.md`)
 
 		if (!historyItem) {
 			result.failed.push({ taskId, error: "Task history item not found" })
 			continue
 		}
+
+		const exportDatePrefix = await getExportDatePrefix({
+			fileSystem,
+			uiMessagesPath,
+			historyTimestamp: historyItem.ts,
+		})
+		const outputPath = path.join(dialogsDir, `${exportDatePrefix}_${getSafeTaskId(taskId)}.md`)
 
 		if (!taskDirectories.has(taskId)) {
 			result.failed.push({ taskId, error: `Task directory not found: ${sourceTaskDir}` })
@@ -173,7 +180,16 @@ export async function exportAllDialogs(
 			const messages = extractTextDialogMessages(uiMessages)
 			const contentHash = getTextDialogContentHash(messages)
 			const markdown = renderTextDialogMarkdown({ historyItem, messages, contentHash })
-			const existingMetadata = await readExistingExportMetadata(fileSystem, outputPath)
+			const existingOutputPath = await findExistingDialogOutputPath({
+				fileSystem,
+				dialogsDir,
+				outputPath,
+				taskId,
+			})
+			const existingMetadata =
+				existingOutputPath === undefined
+					? undefined
+					: await readExistingExportMetadata(fileSystem, existingOutputPath)
 
 			if (existingMetadata === undefined) {
 				await fileSystem.writeFile(outputPath, markdown, "utf8")
@@ -185,7 +201,11 @@ export async function exportAllDialogs(
 				result.warnings.push({ taskId, warning })
 			}
 
-			if (existingMetadata.messageCount !== messages.length || existingMetadata.contentHash !== contentHash) {
+			if (
+				existingMetadata.messageCount !== messages.length ||
+				existingMetadata.contentHash !== contentHash ||
+				existingOutputPath !== outputPath
+			) {
 				await fileSystem.writeFile(outputPath, markdown, "utf8")
 				result.refreshed++
 			} else {
@@ -381,8 +401,41 @@ function renderTextDialogMarkdown({
 	return `${lines.join("\n").trim()}\n`
 }
 
-function safeTaskId(taskId: string): string {
-	return taskId.replace(/[^a-zA-Z0-9._-]/g, "_")
+async function findExistingDialogOutputPath({
+	fileSystem,
+	dialogsDir,
+	outputPath,
+	taskId,
+}: {
+	fileSystem: FileSystemAdapter
+	dialogsDir: string
+	outputPath: string
+	taskId: string
+}): Promise<string | undefined> {
+	if (await fileExists(fileSystem, outputPath)) {
+		return outputPath
+	}
+
+	const legacyOutputPath = path.join(dialogsDir, `${getSafeTaskId(taskId)}.md`)
+
+	if (await fileExists(fileSystem, legacyOutputPath)) {
+		return legacyOutputPath
+	}
+
+	return undefined
+}
+
+async function fileExists(fileSystem: FileSystemAdapter, filePath: string): Promise<boolean> {
+	try {
+		await fileSystem.readFile(filePath, "utf8")
+		return true
+	} catch (error) {
+		if (isMissingPathError(error)) {
+			return false
+		}
+
+		throw error
+	}
 }
 
 async function readJsonArray(fileSystem: FileSystemAdapter, filePath: string): Promise<unknown[]> {

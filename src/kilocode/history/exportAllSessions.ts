@@ -6,6 +6,7 @@ import type { HistoryItem } from "@roo-code/types"
 
 import { GlobalFileNames } from "../../shared/globalFileNames"
 import { getStorageBasePath } from "../../utils/storage"
+import { getExportDatePrefix, getSafeTaskId } from "./exportNames"
 
 /**
  * The subset of {@link ClineProvider} needed to export every stored session.
@@ -111,6 +112,7 @@ export async function exportAllSessions(
 	const currentProjectTaskIds = [...new Set(currentProjectHistory.map((item) => item.id))].sort((a, b) =>
 		a.localeCompare(b),
 	)
+	const historyByTaskId = new Map(currentProjectHistory.map((item) => [item.id, item]))
 
 	await fileSystem.writeFile(taskHistoryPath, JSON.stringify(currentProjectHistory, null, 2), "utf8")
 
@@ -130,8 +132,21 @@ export async function exportAllSessions(
 	}
 
 	for (const taskDirName of currentProjectTaskIds) {
+		const historyItem = historyByTaskId.get(taskDirName)
 		const sourceTaskDir = path.join(sourceTasksDir, taskDirName)
-		const destinationTaskDir = path.join(destinationTasksDir, taskDirName)
+		const uiMessagesPath = path.join(sourceTaskDir, GlobalFileNames.uiMessages)
+
+		if (!historyItem) {
+			result.failed.push({ taskId: taskDirName, error: "Task history item not found" })
+			continue
+		}
+
+		const exportDatePrefix = await getExportDatePrefix({
+			fileSystem,
+			uiMessagesPath,
+			historyTimestamp: historyItem.ts,
+		})
+		const destinationTaskDir = path.join(destinationTasksDir, `${exportDatePrefix}_${getSafeTaskId(taskDirName)}`)
 
 		if (!taskDirectories.has(taskDirName)) {
 			result.failed.push({
@@ -142,19 +157,26 @@ export async function exportAllSessions(
 		}
 
 		try {
-			if (!(await directoryExists(fileSystem, destinationTaskDir))) {
+			const existingDestinationTaskDir = await findExistingDestinationTaskDir({
+				fileSystem,
+				destinationTasksDir,
+				destinationTaskDir,
+				taskDirName,
+			})
+
+			if (existingDestinationTaskDir === undefined) {
 				await copyDirectoryRecursive(fileSystem, sourceTaskDir, destinationTaskDir)
 				result.exported++
 				continue
 			}
 
-			const comparison = await compareTaskMessageCounts(fileSystem, sourceTaskDir, destinationTaskDir)
+			const comparison = await compareTaskMessageCounts(fileSystem, sourceTaskDir, existingDestinationTaskDir)
 
 			for (const warning of comparison.warnings) {
 				result.warnings.push({ taskId: taskDirName, warning })
 			}
 
-			if (comparison.shouldRefresh) {
+			if (comparison.shouldRefresh || existingDestinationTaskDir !== destinationTaskDir) {
 				await copyDirectoryRecursive(fileSystem, sourceTaskDir, destinationTaskDir)
 				result.refreshed++
 			} else {
@@ -202,6 +224,30 @@ async function directoryExists(fileSystem: FileSystemAdapter, dirPath: string): 
 
 		throw error
 	}
+}
+
+async function findExistingDestinationTaskDir({
+	fileSystem,
+	destinationTasksDir,
+	destinationTaskDir,
+	taskDirName,
+}: {
+	fileSystem: FileSystemAdapter
+	destinationTasksDir: string
+	destinationTaskDir: string
+	taskDirName: string
+}): Promise<string | undefined> {
+	if (await directoryExists(fileSystem, destinationTaskDir)) {
+		return destinationTaskDir
+	}
+
+	const legacyDestinationTaskDir = path.join(destinationTasksDir, taskDirName)
+
+	if (await directoryExists(fileSystem, legacyDestinationTaskDir)) {
+		return legacyDestinationTaskDir
+	}
+
+	return undefined
 }
 
 async function compareTaskMessageCounts(
