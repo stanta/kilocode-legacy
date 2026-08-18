@@ -634,7 +634,9 @@ export class ClineProvider
 	private async initializeAutoPurgeScheduler() {
 		try {
 			const { AutoPurgeScheduler } = await import("../../services/auto-purge")
-			this.autoPurgeScheduler = new AutoPurgeScheduler(this.contextProxy.globalStorageUri.fsPath)
+			this.autoPurgeScheduler = new AutoPurgeScheduler(this.contextProxy.globalStorageUri.fsPath, {
+				workspaceRoot: this.cwd,
+			})
 
 			// Start the scheduler with functions to get current settings and task history
 			this.autoPurgeScheduler.start(
@@ -2292,7 +2294,7 @@ export class ClineProvider
 		if (historyItem) {
 			const { getTaskDirectoryPath } = await import("../../utils/storage")
 			const globalStoragePath = this.contextProxy.globalStorageUri.fsPath
-			const taskDirPath = await getTaskDirectoryPath(globalStoragePath, id)
+			const taskDirPath = await getTaskDirectoryPath(globalStoragePath, id, { workspaceRoot: this.cwd })
 			const apiConversationHistoryFilePath = path.join(taskDirPath, GlobalFileNames.apiConversationHistory)
 			const uiMessagesFilePath = path.join(taskDirPath, GlobalFileNames.uiMessages)
 			const fileExists = await fileExistsAtPath(apiConversationHistoryFilePath)
@@ -4467,6 +4469,7 @@ Here is the project's README to help you get started:\n\n${mcpDetails.readmeCont
 			parentClineMessages = await readTaskMessages({
 				taskId: parentTaskId,
 				globalStoragePath,
+				workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
 			})
 		} catch {
 			parentClineMessages = []
@@ -4477,6 +4480,7 @@ Here is the project's README to help you get started:\n\n${mcpDetails.readmeCont
 			parentApiMessages = (await readApiMessages({
 				taskId: parentTaskId,
 				globalStoragePath,
+				workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
 			})) as any[]
 		} catch {
 			parentApiMessages = []
@@ -4496,7 +4500,12 @@ Here is the project's README to help you get started:\n\n${mcpDetails.readmeCont
 			ts,
 		}
 		parentClineMessages.push(subtaskUiMessage)
-		await saveTaskMessages({ messages: parentClineMessages, taskId: parentTaskId, globalStoragePath })
+		await saveTaskMessages({
+			messages: parentClineMessages,
+			taskId: parentTaskId,
+			globalStoragePath,
+			workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
+		})
 
 		// Find the tool_use_id from the last assistant message's new_task tool_use
 		let toolUseId: string | undefined
@@ -4570,7 +4579,12 @@ Here is the project's README to help you get started:\n\n${mcpDetails.readmeCont
 			parentApiMessages[parentApiMessages.length - 1] = validatedMessage
 		}
 
-		await saveApiMessages({ messages: parentApiMessages as any, taskId: parentTaskId, globalStoragePath })
+		await saveApiMessages({
+			messages: parentApiMessages as any,
+			taskId: parentTaskId,
+			globalStoragePath,
+			workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
+		})
 
 		// 3) Update child metadata to "completed" status
 		try {

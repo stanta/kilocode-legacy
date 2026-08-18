@@ -12,7 +12,7 @@ vi.mock("../../../utils/safeWriteJson", () => ({
 }))
 
 // Import after mocks
-import { saveTaskMessages } from "../taskMessages"
+import { readTaskMessages, saveTaskMessages } from "../taskMessages"
 
 let tmpBaseDir: string
 
@@ -64,5 +64,59 @@ describe("taskMessages.saveTaskMessages", () => {
 
 		const [, persisted] = hoisted.safeWriteJsonMock.mock.calls[0]
 		expect(persisted).toEqual(messages)
+	})
+
+	it("persists messages to project-local dialog_sessions_path", async () => {
+		const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "roo-workspace-"))
+		const configDir = path.join(workspaceRoot, ".kilo")
+		await fs.mkdir(configDir, { recursive: true })
+		await fs.writeFile(
+			path.join(configDir, "config.json"),
+			JSON.stringify({ project: { dialog_sessions_path: ".kilo/dialogs" } }),
+		)
+
+		try {
+			const messages: any[] = [{ type: "say", say: "text", text: "Stored locally" }]
+
+			await saveTaskMessages({
+				messages,
+				taskId: "task-local",
+				globalStoragePath: tmpBaseDir,
+				workspaceRoot,
+			})
+
+			expect(hoisted.safeWriteJsonMock).toHaveBeenCalledWith(
+				path.join(workspaceRoot, ".kilo", "dialogs", "task-local", "ui_messages.json"),
+				messages,
+			)
+		} finally {
+			await fs.rm(workspaceRoot, { recursive: true, force: true })
+		}
+	})
+
+	it("reads messages from project-local dialog_sessions_path", async () => {
+		const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "roo-workspace-"))
+		const localTaskDir = path.join(workspaceRoot, ".kilo", "dialogs", "task-local")
+		const messages: any[] = [{ type: "say", say: "text", text: "Read locally" }]
+
+		await fs.mkdir(path.join(workspaceRoot, ".kilo"), { recursive: true })
+		await fs.writeFile(
+			path.join(workspaceRoot, ".kilo", "config.json"),
+			JSON.stringify({ project: { dialog_sessions_path: ".kilo/dialogs" } }),
+		)
+		await fs.mkdir(localTaskDir, { recursive: true })
+		await fs.writeFile(path.join(localTaskDir, "ui_messages.json"), JSON.stringify(messages), "utf8")
+
+		try {
+			await expect(
+				readTaskMessages({
+					taskId: "task-local",
+					globalStoragePath: tmpBaseDir,
+					workspaceRoot,
+				}),
+			).resolves.toEqual(messages)
+		} finally {
+			await fs.rm(workspaceRoot, { recursive: true, force: true })
+		}
 	})
 })

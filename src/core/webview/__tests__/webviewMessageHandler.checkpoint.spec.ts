@@ -65,6 +65,7 @@ describe("webviewMessageHandler - checkpoint operations", () => {
 			contextProxy: {
 				globalStorageUri: { fsPath: "/test/storage" },
 			},
+			cwd: "/test/workspace",
 			getState: vi.fn().mockResolvedValue({
 				maxImageFileSize: 5,
 				maxTotalImageSize: 20,
@@ -151,6 +152,7 @@ describe("webviewMessageHandler - checkpoint operations", () => {
 				messages: expect.any(Array),
 				taskId: "test-task-123",
 				globalStoragePath: "/test/storage",
+				workspaceRoot: "/test/workspace",
 			})
 
 			// Verify checkpoint restore was NOT called

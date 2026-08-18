@@ -317,6 +317,7 @@ export const webviewMessageHandler = async (
 					messages: currentCline.clineMessages,
 					taskId: currentCline.taskId,
 					globalStoragePath: provider.contextProxy.globalStorageUri.fsPath,
+					workspaceRoot: provider.cwd, // kilocode_change: project-local dialog session storage
 				})
 
 				// Update the UI to reflect the deletion
@@ -487,6 +488,7 @@ export const webviewMessageHandler = async (
 				messages: currentCline.clineMessages,
 				taskId: currentCline.taskId,
 				globalStoragePath: provider.contextProxy.globalStorageUri.fsPath,
+				workspaceRoot: provider.cwd, // kilocode_change: project-local dialog session storage
 			})
 
 			// Update the UI to reflect the deletion
@@ -4361,7 +4363,9 @@ export const webviewMessageHandler = async (
 					break
 				}
 
-				const scheduler = new AutoPurgeScheduler(provider.contextProxy.globalStorageUri.fsPath)
+				const scheduler = new AutoPurgeScheduler(provider.contextProxy.globalStorageUri.fsPath, {
+					workspaceRoot: provider.cwd,
+				})
 				const currentTaskId = provider.getCurrentTask()?.taskId
 
 				await scheduler.triggerManualPurge(
@@ -4707,7 +4711,9 @@ export const webviewMessageHandler = async (
 			try {
 				const { getTaskDirectoryPath } = await import("../../utils/storage")
 				const globalStoragePath = provider.contextProxy.globalStorageUri.fsPath
-				const taskDirPath = await getTaskDirectoryPath(globalStoragePath, currentTask.taskId)
+				const taskDirPath = await getTaskDirectoryPath(globalStoragePath, currentTask.taskId, {
+					workspaceRoot: provider.cwd,
+				})
 
 				const fileName =
 					message.type === "openDebugApiHistory" ? "api_conversation_history.json" : "ui_messages.json"
@@ -4770,6 +4776,7 @@ export const webviewMessageHandler = async (
 			await generateErrorDiagnostics({
 				taskId: currentTask.taskId,
 				globalStoragePath: provider.contextProxy.globalStorageUri.fsPath,
+				workspaceRoot: provider.cwd, // kilocode_change: project-local dialog session storage
 				values: message.values,
 				log: (msg) => provider.log(msg),
 			})

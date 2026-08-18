@@ -19,6 +19,7 @@ export type TaskMetadataOptions = {
 	taskNumber: number
 	messages: ClineMessage[]
 	globalStoragePath: string
+	workspaceRoot?: string
 	workspace: string
 	mode?: string
 	/** Provider profile name for the task (sticky profile feature) */
@@ -47,6 +48,7 @@ export async function taskMetadata({
 	taskNumber,
 	messages,
 	globalStoragePath,
+	workspaceRoot,
 	workspace,
 	mode,
 	apiConfigName,
@@ -55,7 +57,9 @@ export async function taskMetadata({
 	sessionRuntimeConfig,
 	cumulativeTotalCost, // kilocode_change
 }: TaskMetadataOptions) {
-	const taskDir = await getTaskDirectoryPath(globalStoragePath, id)
+	// kilocode_change start: project-local dialog session storage
+	const taskDir = await getTaskDirectoryPath(globalStoragePath, id, { workspaceRoot })
+	// kilocode_change end
 
 	// Determine message availability upfront
 	const hasMessages = messages && messages.length > 0

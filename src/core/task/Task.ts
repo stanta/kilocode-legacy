@@ -1286,7 +1286,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	// API Messages
 
 	private async getSavedApiConversationHistory(): Promise<ApiMessage[]> {
-		return readApiMessages({ taskId: this.taskId, globalStoragePath: this.globalStoragePath })
+		return readApiMessages({
+			taskId: this.taskId,
+			globalStoragePath: this.globalStoragePath,
+			workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
+		})
 	}
 
 	private async addToApiConversationHistory(message: Anthropic.MessageParam, reasoning?: string) {
@@ -1468,6 +1472,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				messages: this.apiConversationHistory,
 				taskId: this.taskId,
 				globalStoragePath: this.globalStoragePath,
+				workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
 			})
 
 			// kilocode_change start
@@ -1475,7 +1480,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// This must not prevent saving history or emitting usage events if
 			// storage is unavailable (e.g., during unit tests).
 			try {
-				const taskDir = await getTaskDirectoryPath(this.globalStoragePath, this.taskId)
+				const taskDir = await getTaskDirectoryPath(this.globalStoragePath, this.taskId, {
+					workspaceRoot: this.cwd,
+				})
 				const filePath = path.join(taskDir, GlobalFileNames.apiConversationHistory)
 				const provider = this.providerRef.deref()
 				if (provider) {
@@ -1497,7 +1504,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	// Cline Messages
 
 	private async getSavedClineMessages(): Promise<ClineMessage[]> {
-		return readTaskMessages({ taskId: this.taskId, globalStoragePath: this.globalStoragePath })
+		return readTaskMessages({
+			taskId: this.taskId,
+			globalStoragePath: this.globalStoragePath,
+			workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
+		})
 	}
 
 	private async addToClineMessages(message: ClineMessage) {
@@ -1561,6 +1572,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				messages: this.clineMessages,
 				taskId: this.taskId,
 				globalStoragePath: this.globalStoragePath,
+				workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
 			})
 
 			if (this._taskApiConfigName === undefined) {
@@ -1572,7 +1584,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// Keep this isolated so filesystem issues don't prevent token usage
 			// updates (important for unit tests and degraded environments).
 			try {
-				const taskDir = await getTaskDirectoryPath(this.globalStoragePath, this.taskId)
+				const taskDir = await getTaskDirectoryPath(this.globalStoragePath, this.taskId, {
+					workspaceRoot: this.cwd,
+				})
 				const filePath = path.join(taskDir, GlobalFileNames.uiMessages)
 				const provider = this.providerRef.deref()
 				if (provider) {
@@ -1593,6 +1607,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				taskNumber: this.taskNumber,
 				messages: this.clineMessages,
 				globalStoragePath: this.globalStoragePath,
+				workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
 				workspace: this.cwd,
 				mode: this._taskMode || defaultModeSlug, // Use the task's own mode, not the current provider mode.
 				apiConfigName: this._taskApiConfigName, // Use the task's own provider profile, not the current provider profile.

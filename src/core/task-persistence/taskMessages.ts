@@ -12,13 +12,17 @@ import { getTaskDirectoryPath } from "../../utils/storage"
 export type ReadTaskMessagesOptions = {
 	taskId: string
 	globalStoragePath: string
+	workspaceRoot?: string
 }
 
 export async function readTaskMessages({
 	taskId,
 	globalStoragePath,
+	workspaceRoot,
 }: ReadTaskMessagesOptions): Promise<ClineMessage[]> {
-	const taskDir = await getTaskDirectoryPath(globalStoragePath, taskId)
+	// kilocode_change start: project-local dialog session storage
+	const taskDir = await getTaskDirectoryPath(globalStoragePath, taskId, { workspaceRoot })
+	// kilocode_change end
 	const filePath = path.join(taskDir, GlobalFileNames.uiMessages)
 	const fileExists = await fileExistsAtPath(filePath)
 
@@ -33,10 +37,18 @@ export type SaveTaskMessagesOptions = {
 	messages: ClineMessage[]
 	taskId: string
 	globalStoragePath: string
+	workspaceRoot?: string
 }
 
-export async function saveTaskMessages({ messages, taskId, globalStoragePath }: SaveTaskMessagesOptions) {
-	const taskDir = await getTaskDirectoryPath(globalStoragePath, taskId)
+export async function saveTaskMessages({
+	messages,
+	taskId,
+	globalStoragePath,
+	workspaceRoot,
+}: SaveTaskMessagesOptions) {
+	// kilocode_change start: project-local dialog session storage
+	const taskDir = await getTaskDirectoryPath(globalStoragePath, taskId, { workspaceRoot })
+	// kilocode_change end
 	const filePath = path.join(taskDir, GlobalFileNames.uiMessages)
 	await safeWriteJson(filePath, messages)
 }

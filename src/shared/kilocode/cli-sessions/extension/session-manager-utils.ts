@@ -40,7 +40,7 @@ export function kilo_initializeSessionManager({
 				return
 			}
 
-			const pathProvider = new ExtensionPathProvider(context)
+			const pathProvider = new ExtensionPathProvider(context, { workspaceRoot: provider.cwd })
 			const logger = new ExtensionLoggerAdapter(outputChannel)
 			const extensionMessenger = new ExtensionMessengerImpl(provider)
 

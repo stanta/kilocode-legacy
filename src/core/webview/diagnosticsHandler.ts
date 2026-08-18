@@ -17,6 +17,7 @@ export interface ErrorDiagnosticsValues {
 export interface GenerateDiagnosticsParams {
 	taskId: string
 	globalStoragePath: string
+	workspaceRoot?: string
 	values?: ErrorDiagnosticsValues
 	log: (message: string) => void
 }
@@ -33,10 +34,12 @@ export interface GenerateDiagnosticsResult {
  * before sharing with support.
  */
 export async function generateErrorDiagnostics(params: GenerateDiagnosticsParams): Promise<GenerateDiagnosticsResult> {
-	const { taskId, globalStoragePath, values, log } = params
+	const { taskId, globalStoragePath, workspaceRoot, values, log } = params
 
 	try {
-		const taskDirPath = await getTaskDirectoryPath(globalStoragePath, taskId)
+		// kilocode_change start: project-local dialog session storage
+		const taskDirPath = await getTaskDirectoryPath(globalStoragePath, taskId, { workspaceRoot })
+		// kilocode_change end
 
 		// Load API conversation history from the same file used by openDebugApiHistory
 		const apiHistoryPath = path.join(taskDirPath, "api_conversation_history.json")

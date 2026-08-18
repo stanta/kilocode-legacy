@@ -6,7 +6,7 @@ import path from "path"
 import type { HistoryItem } from "@roo-code/types"
 
 import { GlobalFileNames } from "../../shared/globalFileNames"
-import { getStorageBasePath } from "../../utils/storage"
+import { getDialogSessionStoragePaths } from "../../utils/storage"
 import { getExportDatePrefix, getSafeTaskId } from "./exportNames"
 
 export interface AllDialogsExportProvider {
@@ -50,7 +50,7 @@ export interface FileSystemAdapter {
 export interface ExportAllDialogsOptions {
 	fs?: FileSystemAdapter
 	outputDir?: string
-	getStorageBasePath?: (defaultPath: string) => Promise<string>
+	getDialogSessionStoragePaths?: typeof getDialogSessionStoragePaths
 }
 
 export interface TextDialogMessage {
@@ -100,7 +100,7 @@ export async function exportAllDialogs(
 	options: ExportAllDialogsOptions = {},
 ): Promise<ExportAllDialogsResult> {
 	const fileSystem = options.fs ?? defaultFs
-	const resolveStorageBasePath = options.getStorageBasePath ?? getStorageBasePath
+	const resolveStoragePaths = options.getDialogSessionStoragePaths ?? getDialogSessionStoragePaths
 
 	if (!options.outputDir) {
 		throw new Error("An output directory is required to export current project Kilo Code text dialogs")
@@ -110,8 +110,11 @@ export async function exportAllDialogs(
 	const dialogsDir = path.join(outputDir, "dialogs")
 	const manifestPath = path.join(outputDir, "dialogs_manifest.json")
 	const taskHistoryPath = path.join(outputDir, "dialogs_task_history.json")
-	const storageBasePath = await resolveStorageBasePath(provider.contextProxy.globalStorageUri.fsPath)
-	const sourceTasksDir = path.join(storageBasePath, "tasks")
+	const storagePaths = await resolveStoragePaths(provider.contextProxy.globalStorageUri.fsPath, {
+		workspaceRoot: provider.cwd,
+	})
+	const storageBasePath = storagePaths.basePath
+	const sourceTasksDir = storagePaths.tasksDir
 
 	assertExportDestinationIsSafe(sourceTasksDir, dialogsDir)
 

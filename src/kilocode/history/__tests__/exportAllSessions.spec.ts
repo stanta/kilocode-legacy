@@ -159,7 +159,11 @@ describe("exportAllSessions", () => {
 			exportAllSessions(createProvider([]), {
 				fs: fileSystem,
 				outputDir: "/global-storage/tasks/task-1/export",
-				getStorageBasePath: async (defaultPath) => defaultPath,
+				getDialogSessionStoragePaths: async (defaultPath) => ({
+					basePath: defaultPath,
+					tasksDir: `${defaultPath}/tasks`,
+					isProjectLocal: false,
+				}),
 			}),
 		).rejects.toThrow("Export destination cannot be inside the Kilo Code tasks storage directory")
 	})
@@ -184,7 +188,11 @@ describe("exportAllSessions", () => {
 		const result = await exportAllSessions(provider, {
 			fs: fileSystem,
 			outputDir,
-			getStorageBasePath: async () => "/custom-storage",
+			getDialogSessionStoragePaths: async () => ({
+				basePath: "/custom-storage",
+				tasksDir: "/custom-storage/tasks",
+				isProjectLocal: false,
+			}),
 		})
 
 		expect(result).toMatchObject({
@@ -224,6 +232,31 @@ describe("exportAllSessions", () => {
 		})
 	})
 
+	it("exports raw task directories from project-local dialog session storage", async () => {
+		const fileSystem = new MemoryFs()
+		const provider = createProvider([createHistoryItem({ id: "task-1" })])
+		fileSystem.addFile("/workspace/.kilo/dialogs/task-1/api_conversation_history.json", "[]")
+		fileSystem.addFile("/workspace/.kilo/dialogs/task-1/ui_messages.json", "[]")
+
+		const result = await exportAllSessions(provider, {
+			fs: fileSystem,
+			outputDir,
+			getDialogSessionStoragePaths: async () => ({
+				basePath: "/workspace/.kilo/dialogs",
+				tasksDir: "/workspace/.kilo/dialogs",
+				isProjectLocal: true,
+			}),
+		})
+
+		expect(result).toMatchObject({
+			storageBasePath: "/workspace/.kilo/dialogs",
+			total: 1,
+			exported: 1,
+			failed: [],
+		})
+		expect(fileSystem.files.get(path.join(exportedTaskDir("task-1"), "api_conversation_history.json"))).toBe("[]")
+	})
+
 	it("skips orphan storage task directories not represented in current-project history", async () => {
 		const fileSystem = new MemoryFs()
 		fileSystem.addFile("/global-storage/tasks/orphan-task/api_conversation_history.json", "orphan")
@@ -231,7 +264,11 @@ describe("exportAllSessions", () => {
 		const result = await exportAllSessions(createProvider([]), {
 			fs: fileSystem,
 			outputDir,
-			getStorageBasePath: async (defaultPath) => defaultPath,
+			getDialogSessionStoragePaths: async (defaultPath) => ({
+				basePath: defaultPath,
+				tasksDir: `${defaultPath}/tasks`,
+				isProjectLocal: false,
+			}),
 		})
 
 		expect(result).toMatchObject({ total: 0, exported: 0, refreshed: 0, skipped: 0, failed: [], warnings: [] })
@@ -248,7 +285,11 @@ describe("exportAllSessions", () => {
 		const result = await exportAllSessions(createProvider([createHistoryItem({ id: "task-1" })]), {
 			fs: fileSystem,
 			outputDir,
-			getStorageBasePath: async (defaultPath) => defaultPath,
+			getDialogSessionStoragePaths: async (defaultPath) => ({
+				basePath: defaultPath,
+				tasksDir: `${defaultPath}/tasks`,
+				isProjectLocal: false,
+			}),
 		})
 
 		expect(fileSystem.files.has(path.join(exportedTaskDir("task-1"), "export_complete.json"))).toBe(false)
@@ -270,7 +311,11 @@ describe("exportAllSessions", () => {
 			{
 				fs: fileSystem,
 				outputDir,
-				getStorageBasePath: async (defaultPath) => defaultPath,
+				getDialogSessionStoragePaths: async (defaultPath) => ({
+					basePath: defaultPath,
+					tasksDir: `${defaultPath}/tasks`,
+					isProjectLocal: false,
+				}),
 			},
 		)
 
@@ -288,7 +333,11 @@ describe("exportAllSessions", () => {
 		const result = await exportAllSessions(provider, {
 			fs: fileSystem,
 			outputDir,
-			getStorageBasePath: async () => "/missing-storage",
+			getDialogSessionStoragePaths: async () => ({
+				basePath: "/missing-storage",
+				tasksDir: "/missing-storage/tasks",
+				isProjectLocal: false,
+			}),
 		})
 
 		expect(result).toMatchObject({
@@ -312,7 +361,11 @@ describe("exportAllSessions", () => {
 		const result = await exportAllSessions(provider, {
 			fs: fileSystem,
 			outputDir,
-			getStorageBasePath: async () => "/missing-storage",
+			getDialogSessionStoragePaths: async () => ({
+				basePath: "/missing-storage",
+				tasksDir: "/missing-storage/tasks",
+				isProjectLocal: false,
+			}),
 		})
 
 		expect(result).toMatchObject({
@@ -337,7 +390,11 @@ describe("exportAllSessions", () => {
 			{
 				fs: fileSystem,
 				outputDir,
-				getStorageBasePath: async (defaultPath) => defaultPath,
+				getDialogSessionStoragePaths: async (defaultPath) => ({
+					basePath: defaultPath,
+					tasksDir: `${defaultPath}/tasks`,
+					isProjectLocal: false,
+				}),
 			},
 		)
 
@@ -361,7 +418,11 @@ describe("exportAllSessions", () => {
 		const result = await exportAllSessions(createProvider([createHistoryItem({ id: "task-1" })]), {
 			fs: fileSystem,
 			outputDir,
-			getStorageBasePath: async (defaultPath) => defaultPath,
+			getDialogSessionStoragePaths: async (defaultPath) => ({
+				basePath: defaultPath,
+				tasksDir: `${defaultPath}/tasks`,
+				isProjectLocal: false,
+			}),
 		})
 
 		expect(result).toMatchObject({ total: 1, exported: 0, refreshed: 0, skipped: 1, failed: [], warnings: [] })
@@ -383,7 +444,11 @@ describe("exportAllSessions", () => {
 		const result = await exportAllSessions(createProvider([createHistoryItem({ id: "task-1" })]), {
 			fs: fileSystem,
 			outputDir,
-			getStorageBasePath: async (defaultPath) => defaultPath,
+			getDialogSessionStoragePaths: async (defaultPath) => ({
+				basePath: defaultPath,
+				tasksDir: `${defaultPath}/tasks`,
+				isProjectLocal: false,
+			}),
 		})
 
 		expect(result).toMatchObject({ total: 1, exported: 0, refreshed: 1, skipped: 0, failed: [], warnings: [] })
@@ -406,7 +471,11 @@ describe("exportAllSessions", () => {
 		const result = await exportAllSessions(createProvider([createHistoryItem({ id: "task-1" })]), {
 			fs: fileSystem,
 			outputDir,
-			getStorageBasePath: async (defaultPath) => defaultPath,
+			getDialogSessionStoragePaths: async (defaultPath) => ({
+				basePath: defaultPath,
+				tasksDir: `${defaultPath}/tasks`,
+				isProjectLocal: false,
+			}),
 		})
 
 		expect(result).toMatchObject({ total: 1, exported: 0, refreshed: 1, skipped: 0, failed: [], warnings: [] })
@@ -433,7 +502,11 @@ describe("exportAllSessions", () => {
 			{
 				fs: fileSystem,
 				outputDir,
-				getStorageBasePath: async (defaultPath) => defaultPath,
+				getDialogSessionStoragePaths: async (defaultPath) => ({
+					basePath: defaultPath,
+					tasksDir: `${defaultPath}/tasks`,
+					isProjectLocal: false,
+				}),
 			},
 		)
 
@@ -457,7 +530,11 @@ describe("exportAllSessions", () => {
 		const result = await exportAllSessions(createProvider([createHistoryItem({ id: "task-1" })]), {
 			fs: fileSystem,
 			outputDir,
-			getStorageBasePath: async (defaultPath) => defaultPath,
+			getDialogSessionStoragePaths: async (defaultPath) => ({
+				basePath: defaultPath,
+				tasksDir: `${defaultPath}/tasks`,
+				isProjectLocal: false,
+			}),
 		})
 
 		expect(result).toMatchObject({ total: 1, exported: 0, refreshed: 0, skipped: 1, failed: [] })

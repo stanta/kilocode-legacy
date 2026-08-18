@@ -78,4 +78,6 @@ qdrant_storage/
 
 roo-cli-*.tar.gz*
 .kilo/
-.kilocode/
+.kilocode/*
+!.kilocode/skills/
+!.kilocode/skills/**

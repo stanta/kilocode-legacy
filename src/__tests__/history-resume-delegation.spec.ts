@@ -73,6 +73,7 @@ describe("History resume delegation - parent metadata transitions", () => {
 
 		const provider = {
 			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
+			cwd: "/workspace",
 			getTaskWithId,
 			emit: providerEmit,
 			getCurrentTask: vi.fn(() => ({ taskId: "child-1" })),
@@ -122,6 +123,7 @@ describe("History resume delegation - parent metadata transitions", () => {
 	it("reopenParentFromDelegation injects subtask_result into both UI and API histories", async () => {
 		const provider = {
 			contextProxy: { globalStorageUri: { fsPath: "/storage" } },
+			cwd: "/workspace",
 			getTaskWithId: vi.fn().mockResolvedValue({
 				historyItem: {
 					id: "p1",
@@ -172,6 +174,7 @@ describe("History resume delegation - parent metadata transitions", () => {
 				]),
 				taskId: "p1",
 				globalStoragePath: "/storage",
+				workspaceRoot: "/workspace",
 			}),
 		)
 
@@ -191,20 +194,32 @@ describe("History resume delegation - parent metadata transitions", () => {
 				]),
 				taskId: "p1",
 				globalStoragePath: "/storage",
+				workspaceRoot: "/workspace",
 			}),
 		)
 
 		// Verify both include original messages
 		const uiCall = vi.mocked(saveTaskMessages).mock.calls[0][0]
 		expect(uiCall.messages).toHaveLength(2) // 1 original + 1 injected
+		expect(vi.mocked(readTaskMessages)).toHaveBeenCalledWith({
+			taskId: "p1",
+			globalStoragePath: "/storage",
+			workspaceRoot: "/workspace",
+		})
 
 		const apiCall = vi.mocked(saveApiMessages).mock.calls[0][0]
 		expect(apiCall.messages).toHaveLength(2) // 1 original + 1 injected
+		expect(vi.mocked(readApiMessages)).toHaveBeenCalledWith({
+			taskId: "p1",
+			globalStoragePath: "/storage",
+			workspaceRoot: "/workspace",
+		})
 	})
 
 	it("reopenParentFromDelegation injects tool_result when new_task tool_use exists in API history", async () => {
 		const provider = {
 			contextProxy: { globalStorageUri: { fsPath: "/storage" } },
+			cwd: "/workspace",
 			getTaskWithId: vi.fn().mockResolvedValue({
 				historyItem: {
 					id: "p-tool",
@@ -274,6 +289,7 @@ describe("History resume delegation - parent metadata transitions", () => {
 				]),
 				taskId: "p-tool",
 				globalStoragePath: "/storage",
+				workspaceRoot: "/workspace",
 			}),
 		)
 
@@ -301,6 +317,7 @@ describe("History resume delegation - parent metadata transitions", () => {
 
 		const provider = {
 			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
+			cwd: "/workspace",
 			getTaskWithId: vi.fn().mockResolvedValue({
 				historyItem: {
 					id: "parent-2",
@@ -340,6 +357,7 @@ describe("History resume delegation - parent metadata transitions", () => {
 
 		const provider = {
 			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
+			cwd: "/workspace",
 			getTaskWithId: vi.fn().mockResolvedValue({
 				historyItem: {
 					id: "p3",
@@ -390,6 +408,7 @@ describe("History resume delegation - parent metadata transitions", () => {
 
 		const provider = {
 			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
+			cwd: "/workspace",
 			getTaskWithId: vi.fn().mockResolvedValue({
 				historyItem: {
 					id: "p4",
@@ -433,6 +452,7 @@ describe("History resume delegation - parent metadata transitions", () => {
 	it("handles empty history gracefully when injecting synthetic messages", async () => {
 		const provider = {
 			contextProxy: { globalStorageUri: { fsPath: "/tmp" } },
+			cwd: "/workspace",
 			getTaskWithId: vi.fn().mockResolvedValue({
 				historyItem: {
 					id: "p5",
@@ -478,6 +498,7 @@ describe("History resume delegation - parent metadata transitions", () => {
 						say: "subtask_result",
 					}),
 				],
+				workspaceRoot: "/workspace",
 			}),
 		)
 
@@ -488,6 +509,7 @@ describe("History resume delegation - parent metadata transitions", () => {
 						role: "user",
 					}),
 				],
+				workspaceRoot: "/workspace",
 			}),
 		)
 	})

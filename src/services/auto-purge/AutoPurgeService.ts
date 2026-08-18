@@ -12,7 +12,7 @@ import {
 	TelemetryEventName,
 } from "@roo-code/types"
 import { TelemetryService } from "@roo-code/telemetry"
-import { getTaskDirectoryPath } from "../../utils/storage"
+import { getTaskDirectoryPath, type DialogSessionStorageOptions } from "../../utils/storage"
 import { fileExistsAtPath } from "../../utils/fs"
 
 /**
@@ -20,9 +20,11 @@ import { fileExistsAtPath } from "../../utils/fs"
  */
 export class AutoPurgeService {
 	private readonly globalStoragePath: string
+	private readonly storageOptions: DialogSessionStorageOptions // kilocode_change: project-local dialog session storage
 
-	constructor(globalStoragePath: string) {
+	constructor(globalStoragePath: string, storageOptions: DialogSessionStorageOptions = {}) {
 		this.globalStoragePath = globalStoragePath
+		this.storageOptions = storageOptions // kilocode_change: project-local dialog session storage
 	}
 
 	/**
@@ -166,7 +168,11 @@ export class AutoPurgeService {
 				const ageInDays = Math.floor((now - historyItem.ts) / (1000 * 60 * 60 * 24))
 				const retentionDays = this.getRetentionDaysForTaskType(taskType, settings)
 				const shouldPurge = retentionDays !== null && ageInDays > retentionDays
-				const taskDirectoryPath = await getTaskDirectoryPath(this.globalStoragePath, historyItem.id)
+				const taskDirectoryPath = await getTaskDirectoryPath(
+					this.globalStoragePath,
+					historyItem.id,
+					this.storageOptions,
+				)
 
 				// Check if task directory actually exists
 				const taskDirExists = await fileExistsAtPath(taskDirectoryPath)
@@ -221,7 +227,7 @@ export class AutoPurgeService {
 	 */
 	private async checkTaskCompletion(taskId: string): Promise<boolean> {
 		try {
-			const taskDirectoryPath = await getTaskDirectoryPath(this.globalStoragePath, taskId)
+			const taskDirectoryPath = await getTaskDirectoryPath(this.globalStoragePath, taskId, this.storageOptions)
 			const uiMessagesPath = path.join(taskDirectoryPath, "ui_messages.json")
 
 			// Check if the UI messages file exists
@@ -268,7 +274,7 @@ export class AutoPurgeService {
 	 * Delete all files associated with a task
 	 */
 	private async deleteTaskFiles(taskId: string): Promise<void> {
-		const taskDir = await getTaskDirectoryPath(this.globalStoragePath, taskId)
+		const taskDir = await getTaskDirectoryPath(this.globalStoragePath, taskId, this.storageOptions)
 
 		if (await fileExistsAtPath(taskDir)) {
 			await fs.rm(taskDir, { recursive: true, force: true })

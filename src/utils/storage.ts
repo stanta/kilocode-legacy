@@ -6,6 +6,127 @@ import * as fsSync from "fs" // // kilocode_change
 
 import { Package } from "../shared/package"
 import { t } from "../i18n"
+import { getKilocodeConfigFile } from "./kilo-config-file"
+
+// kilocode_change start: project-local dialog session storage
+export interface DialogSessionStorageOptions {
+	workspaceRoot?: string
+}
+
+export interface DialogSessionStoragePaths {
+	basePath: string
+	tasksDir: string
+	isProjectLocal: boolean
+}
+
+export function resolveDialogSessionsPath(
+	workspaceRoot: string,
+	configuredPath: string | undefined,
+): string | undefined {
+	if (!configuredPath || configuredPath.trim().length === 0) {
+		return undefined
+	}
+
+	if (path.isAbsolute(configuredPath)) {
+		return undefined
+	}
+
+	const resolvedWorkspaceRoot = path.resolve(workspaceRoot)
+	const resolvedPath = path.resolve(resolvedWorkspaceRoot, configuredPath)
+
+	if (resolvedPath !== resolvedWorkspaceRoot && !resolvedPath.startsWith(`${resolvedWorkspaceRoot}${path.sep}`)) {
+		return undefined
+	}
+
+	return resolvedPath
+}
+
+export async function getDialogSessionStoragePaths(
+	defaultPath: string,
+	options: DialogSessionStorageOptions = {},
+): Promise<DialogSessionStoragePaths> {
+	if (options.workspaceRoot) {
+		try {
+			const config = await getKilocodeConfigFile(options.workspaceRoot)
+			const projectDialogSessionsPath = resolveDialogSessionsPath(
+				options.workspaceRoot,
+				config?.project?.dialog_sessions_path,
+			)
+
+			if (projectDialogSessionsPath) {
+				await fs.mkdir(projectDialogSessionsPath, { recursive: true })
+				return {
+					basePath: projectDialogSessionsPath,
+					tasksDir: projectDialogSessionsPath,
+					isProjectLocal: true,
+				}
+			}
+		} catch (error) {
+			console.warn(
+				`Could not resolve project dialog sessions path - using default storage: ${error instanceof Error ? error.message : String(error)}`,
+			)
+		}
+	}
+
+	const basePath = await getStorageBasePath(defaultPath)
+	return {
+		basePath,
+		tasksDir: path.join(basePath, "tasks"),
+		isProjectLocal: false,
+	}
+}
+
+export function getDialogSessionStoragePathsSync(
+	defaultPath: string,
+	options: DialogSessionStorageOptions = {},
+): DialogSessionStoragePaths {
+	if (options.workspaceRoot) {
+		try {
+			const configPath = path.join(options.workspaceRoot, ".kilo", "config.json")
+			const fallbackConfigPath = path.join(options.workspaceRoot, ".kilocode", "config.json")
+			const readableConfigPath = fsSync.existsSync(configPath) ? configPath : fallbackConfigPath
+			if (fsSync.existsSync(readableConfigPath)) {
+				const parsedConfig = JSON.parse(fsSync.readFileSync(readableConfigPath, "utf8")) as {
+					project?: { dialog_sessions_path?: unknown }
+				}
+				const projectDialogSessionsPath = resolveDialogSessionsPath(
+					options.workspaceRoot,
+					typeof parsedConfig.project?.dialog_sessions_path === "string"
+						? parsedConfig.project.dialog_sessions_path
+						: undefined,
+				)
+
+				if (projectDialogSessionsPath) {
+					fsSync.mkdirSync(projectDialogSessionsPath, { recursive: true })
+					return {
+						basePath: projectDialogSessionsPath,
+						tasksDir: projectDialogSessionsPath,
+						isProjectLocal: true,
+					}
+				}
+			}
+		} catch (error) {
+			console.warn(
+				`Could not resolve project dialog sessions path - using default storage: ${error instanceof Error ? error.message : String(error)}`,
+			)
+		}
+	}
+
+	const basePath = getStorageBasePathSync(defaultPath)
+	return {
+		basePath,
+		tasksDir: path.join(basePath, "tasks"),
+		isProjectLocal: false,
+	}
+}
+
+export async function getDialogSessionsBasePath(
+	defaultPath: string,
+	options: DialogSessionStorageOptions = {},
+): Promise<string> {
+	return (await getDialogSessionStoragePaths(defaultPath, options)).basePath
+}
+// kilocode_change end
 
 /**
  * Gets the base storage path for conversations
@@ -76,9 +197,15 @@ export function getStorageBasePathSync(defaultPath: string): string {
 /**
  * Gets the storage directory path for a task
  */
-export async function getTaskDirectoryPath(globalStoragePath: string, taskId: string): Promise<string> {
-	const basePath = await getStorageBasePath(globalStoragePath)
-	const taskDir = path.join(basePath, "tasks", taskId)
+export async function getTaskDirectoryPath(
+	globalStoragePath: string,
+	taskId: string,
+	options: DialogSessionStorageOptions = {},
+): Promise<string> {
+	// kilocode_change start: allow project-local dialog session storage
+	const { tasksDir } = await getDialogSessionStoragePaths(globalStoragePath, options)
+	const taskDir = path.join(tasksDir, taskId)
+	// kilocode_change end
 	await fs.mkdir(taskDir, { recursive: true })
 	return taskDir
 }

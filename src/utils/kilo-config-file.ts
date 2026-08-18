@@ -9,6 +9,7 @@ export const KilocodeConfigProject = z.object({
 	id: z.string().optional(),
 	managedIndexingEnabled: z.boolean().optional(),
 	baseBranch: z.string().optional(),
+	dialog_sessions_path: z.string().optional(),
 })
 
 export const KilocodeConfig = z.object({
@@ -16,6 +17,10 @@ export const KilocodeConfig = z.object({
 })
 
 export type KilocodeConfig = z.infer<typeof KilocodeConfig>
+
+const KILOCODE_CONFIG_DIR = ".kilocode"
+const KILO_CONFIG_DIR = ".kilo"
+const CONFIG_FILE_NAME = "config.json"
 
 /**
  * Normalizes a project identifier for consistent tracking.
@@ -83,22 +88,33 @@ export async function getKilocodeConfig(
 }
 
 /**
- * Reads the project configuration from .kilocode/config.json
- * Note: .kilocode/config.jsonc is not supported to avoid bundling issues
+ * Reads the project configuration from .kilocode/config.json or .kilo/config.json.
+ * Note: config.jsonc is not supported to avoid bundling issues.
  *
  * @param workspaceRoot The root path of the workspace
  * @returns The project configuration or undefined if not found or invalid
  */
 export async function getKilocodeConfigFile(workspaceRoot: string): Promise<KilocodeConfig | null> {
-	const configPath = path.join(workspaceRoot, ".kilocode", "config.json")
-	try {
-		const content = await fs.readFile(configPath, "utf8")
-		const config = KilocodeConfig.parse(JSON.parse(content))
-		return config
-	} catch (error) {
-		// File doesn't exist or can't be read
-		return null
+	for (const configPath of getKilocodeConfigFilePaths(workspaceRoot)) {
+		try {
+			const content = await fs.readFile(configPath, "utf8")
+			const config = KilocodeConfig.parse(JSON.parse(content))
+			return config
+		} catch (error) {
+			// File doesn't exist, can't be read, or is invalid. Try the alias config path next.
+		}
 	}
+
+	return null
+}
+
+export function getKilocodeConfigFilePaths(workspaceRoot: string): string[] {
+	// kilocode_change start: support .kilo project config path as an alias for .kilocode
+	return [
+		path.join(workspaceRoot, KILO_CONFIG_DIR, CONFIG_FILE_NAME),
+		path.join(workspaceRoot, KILOCODE_CONFIG_DIR, CONFIG_FILE_NAME),
+	]
+	// kilocode_change end
 }
 
 /**

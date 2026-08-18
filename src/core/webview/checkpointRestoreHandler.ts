@@ -71,6 +71,7 @@ export async function handleCheckpointRestoreOperation(config: CheckpointRestore
 				messages: currentCline.clineMessages,
 				taskId: currentCline.taskId,
 				globalStoragePath: provider.contextProxy.globalStorageUri.fsPath,
+				workspaceRoot: provider.cwd, // kilocode_change: project-local dialog session storage
 			})
 
 			// Get the updated history item and reinitialize

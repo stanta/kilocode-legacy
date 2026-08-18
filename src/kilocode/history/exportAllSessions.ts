@@ -5,7 +5,7 @@ import path from "path"
 import type { HistoryItem } from "@roo-code/types"
 
 import { GlobalFileNames } from "../../shared/globalFileNames"
-import { getStorageBasePath } from "../../utils/storage"
+import { getDialogSessionStoragePaths } from "../../utils/storage"
 import { getExportDatePrefix, getSafeTaskId } from "./exportNames"
 
 /**
@@ -53,7 +53,7 @@ export interface FileSystemAdapter {
 export interface ExportAllSessionsOptions {
 	fs?: FileSystemAdapter
 	outputDir?: string
-	getStorageBasePath?: (defaultPath: string) => Promise<string>
+	getDialogSessionStoragePaths?: typeof getDialogSessionStoragePaths
 }
 
 const defaultFs: FileSystemAdapter = {
@@ -88,7 +88,7 @@ export async function exportAllSessions(
 	options: ExportAllSessionsOptions = {},
 ): Promise<ExportAllSessionsResult> {
 	const fileSystem = options.fs ?? defaultFs
-	const resolveStorageBasePath = options.getStorageBasePath ?? getStorageBasePath
+	const resolveStoragePaths = options.getDialogSessionStoragePaths ?? getDialogSessionStoragePaths
 
 	if (!options.outputDir) {
 		throw new Error("An output directory is required to export current project Kilo Code sessions")
@@ -97,8 +97,11 @@ export async function exportAllSessions(
 	const outputDir = options.outputDir
 	const taskHistoryPath = path.join(outputDir, "task_history.json")
 	const manifestPath = path.join(outputDir, "export_manifest.json")
-	const storageBasePath = await resolveStorageBasePath(provider.contextProxy.globalStorageUri.fsPath)
-	const sourceTasksDir = path.join(storageBasePath, "tasks")
+	const storagePaths = await resolveStoragePaths(provider.contextProxy.globalStorageUri.fsPath, {
+		workspaceRoot: provider.cwd,
+	})
+	const storageBasePath = storagePaths.basePath
+	const sourceTasksDir = storagePaths.tasksDir
 	const destinationTasksDir = path.join(outputDir, "tasks")
 
 	assertExportDestinationIsSafe(sourceTasksDir, destinationTasksDir)

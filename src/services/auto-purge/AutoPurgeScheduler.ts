@@ -2,6 +2,7 @@ import * as vscode from "vscode"
 import { AutoPurgeService } from "./AutoPurgeService"
 import { type AutoPurgeSettings, type HistoryItem, TelemetryEventName } from "@roo-code/types"
 import { TelemetryService } from "@roo-code/telemetry"
+import type { DialogSessionStorageOptions } from "../../utils/storage"
 
 /**
  * Scheduler for automatic task purging operations
@@ -16,8 +17,8 @@ export class AutoPurgeScheduler {
 	// Wait 30 seconds after startup before first check
 	private static readonly STARTUP_DELAY_MS = 30 * 1000
 
-	constructor(globalStoragePath: string) {
-		this.autoPurgeService = new AutoPurgeService(globalStoragePath)
+	constructor(globalStoragePath: string, storageOptions: DialogSessionStorageOptions = {}) {
+		this.autoPurgeService = new AutoPurgeService(globalStoragePath, storageOptions)
 	}
 
 	/**
