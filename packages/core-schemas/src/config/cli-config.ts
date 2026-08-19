@@ -21,7 +21,7 @@ export const cliConfigSchema = z.object({
 	autoApproval: autoApprovalConfigSchema.optional(),
 	theme: themeIdSchema.optional(),
 	customThemes: z.record(z.string(), themeSchema).optional(),
-	maxConcurrentFileReads: z.number().min(1).default(DEFAULT_MAX_CONCURRENT_FILE_READS).optional(),
+	maxConcurrentFileReads: z.number().min(1).default(DEFAULT_MAX_CONCURRENT_FILE_READS),
 })
 
 // Inferred type

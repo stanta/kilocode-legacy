@@ -103,6 +103,14 @@ describe("webviewMessageHandler - Automatic Organization Switching", () => {
 				},
 				currentApiConfigName: "default",
 			}),
+			getRuntimeProviderProfile: vi.fn().mockReturnValue({
+				currentApiConfigName: "default",
+				apiConfiguration: {
+					kilocodeToken: "test-token",
+					kilocodeOrganizationId: undefined,
+				},
+				currentMode: "code",
+			}),
 			contextProxy: {
 				getValue: mockGetGlobalState,
 				setValue: mockUpdateGlobalState,

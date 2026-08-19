@@ -56,6 +56,8 @@ const mockClineProvider = {
 	},
 	log: vi.fn(),
 	postStateToWebview: vi.fn(),
+	getMode: vi.fn().mockResolvedValue("code"),
+	handleModeSwitch: vi.fn(),
 	getCurrentTask: vi.fn(),
 	getTaskWithId: vi.fn(),
 	createTaskWithHistoryItem: vi.fn(),
