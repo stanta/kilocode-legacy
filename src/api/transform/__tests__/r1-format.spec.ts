@@ -205,6 +205,9 @@ describe("convertToR1Format", () => {
 			expect(result[1]).toMatchObject({
 				role: "assistant",
 				content: "Let me check the weather for you.",
+				// kilocode_change start
+				reasoning_content: "",
+				// kilocode_change end
 				tool_calls: [
 					{
 						id: "call_123",
@@ -212,6 +215,41 @@ describe("convertToR1Format", () => {
 						function: {
 							name: "get_weather",
 							arguments: '{"location":"San Francisco"}',
+						},
+					},
+				],
+			})
+		})
+
+		it("should add empty reasoning_content for tool calls without reasoning blocks", () => {
+			const input: Anthropic.Messages.MessageParam[] = [
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "tool_use",
+							id: "call_cross_provider",
+							name: "read_file",
+							input: { path: "src/index.ts" },
+						},
+					],
+				},
+			]
+
+			const result = convertToR1Format(input)
+
+			expect(result).toHaveLength(1)
+			expect(result[0]).toMatchObject({
+				role: "assistant",
+				content: null,
+				reasoning_content: "",
+				tool_calls: [
+					{
+						id: "call_cross_provider",
+						type: "function",
+						function: {
+							name: "read_file",
+							arguments: '{"path":"src/index.ts"}',
 						},
 					},
 				],
@@ -301,6 +339,43 @@ describe("convertToR1Format", () => {
 
 			expect(result).toHaveLength(2)
 			expect((result[1] as any).reasoning_content).toBe("Let me analyze step by step...")
+		})
+
+		it("should preserve non-empty reasoning_content from assistant reasoning blocks with tool calls", () => {
+			const input: Anthropic.Messages.MessageParam[] = [
+				{
+					role: "assistant",
+					content: [
+						{ type: "reasoning", text: "Need to inspect the file first." } as any,
+						{ type: "text", text: "I'll inspect the file." },
+						{
+							type: "tool_use",
+							id: "call_reasoning",
+							name: "read_file",
+							input: { path: "src/api/transform/r1-format.ts" },
+						},
+					],
+				},
+			]
+
+			const result = convertToR1Format(input)
+
+			expect(result).toHaveLength(1)
+			expect(result[0]).toMatchObject({
+				role: "assistant",
+				content: "I'll inspect the file.",
+				reasoning_content: "Need to inspect the file first.",
+				tool_calls: [
+					{
+						id: "call_reasoning",
+						type: "function",
+						function: {
+							name: "read_file",
+							arguments: '{"path":"src/api/transform/r1-format.ts"}',
+						},
+					},
+				],
+			})
 		})
 
 		it("should handle mixed tool_result and text in user message", () => {
