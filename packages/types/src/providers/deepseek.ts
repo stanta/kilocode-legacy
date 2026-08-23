@@ -6,7 +6,7 @@ import type { ModelInfo } from "../model.js"
 // continuation within the same turn. See: https://api-docs.deepseek.com/guides/thinking_mode
 export type DeepSeekModelId = keyof typeof deepSeekModels
 
-export const deepSeekDefaultModelId: DeepSeekModelId = "deepseek-chat"
+export const deepSeekDefaultModelId: DeepSeekModelId = "deepseek-v4-pro"
 
 export const deepSeekModels = {
 	"deepseek-chat": {
@@ -16,6 +16,7 @@ export const deepSeekModels = {
 		supportsPromptCache: true,
 		supportsNativeTools: true,
 		defaultToolProtocol: "native",
+		deprecated: true, // Legacy V3.2 model - superseded by deepseek-v4-pro
 		inputPrice: 0.28, // $0.28 per million tokens (cache miss) - Updated Dec 9, 2025
 		outputPrice: 0.42, // $0.42 per million tokens - Updated Dec 9, 2025
 		cacheWritesPrice: 0.28, // $0.28 per million tokens (cache miss) - Updated Dec 9, 2025
@@ -30,6 +31,7 @@ export const deepSeekModels = {
 		supportsNativeTools: true,
 		defaultToolProtocol: "native",
 		preserveReasoning: true,
+		deprecated: true, // Legacy V3.2 thinking model - superseded by deepseek-v4-pro
 		inputPrice: 0.28, // $0.28 per million tokens (cache miss) - Updated Dec 9, 2025
 		outputPrice: 0.42, // $0.42 per million tokens - Updated Dec 9, 2025
 		cacheWritesPrice: 0.28, // $0.28 per million tokens (cache miss) - Updated Dec 9, 2025
@@ -44,10 +46,15 @@ export const deepSeekModels = {
 		supportsNativeTools: true,
 		defaultToolProtocol: "native",
 		preserveReasoning: true,
-		inputPrice: 1.74, // $1.74 per million tokens (cache miss)
-		outputPrice: 3.48, // $3.48 per million tokens
-		cacheWritesPrice: 1.74, // $1.74 per million tokens (cache miss)
-		cacheReadsPrice: 0.0145, // $0.0145 per million tokens (cache hit)
+		supportsReasoningEffort: true,
+		reasoningEffort: "high",
+		supportsTemperature: true,
+		defaultTemperature: 1,
+		// Peak-tier pricing (off-peak rates are lower)
+		inputPrice: 1.32, // $1.32 per million tokens (cache miss) - peak
+		outputPrice: 3.96, // $3.96 per million tokens - peak
+		cacheWritesPrice: 1.32, // $1.32 per million tokens (cache miss) - peak
+		cacheReadsPrice: 0.044, // $0.044 per million tokens (cache hit) - peak
 		description: `DeepSeek-V4-Pro is the flagship Mixture-of-Experts model in the DeepSeek-V4 Preview series with 1.6T total parameters and 49B activated parameters. Supports a 1M-token context window with up to 384K output tokens, thinking mode (default), JSON output, tool calls, chat prefix completion (beta), and FIM completion (beta, non-thinking only). Best for complex reasoning, advanced coding, agentic workflows, and long-context analysis.`,
 	},
 	"deepseek-v4-flash": {
@@ -58,6 +65,10 @@ export const deepSeekModels = {
 		supportsNativeTools: true,
 		defaultToolProtocol: "native",
 		preserveReasoning: true,
+		supportsReasoningEffort: true,
+		reasoningEffort: "high",
+		supportsTemperature: true,
+		defaultTemperature: 1,
 		inputPrice: 0.14, // $0.14 per million tokens (cache miss)
 		outputPrice: 0.28, // $0.28 per million tokens
 		cacheWritesPrice: 0.14, // $0.14 per million tokens (cache miss)

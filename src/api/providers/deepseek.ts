@@ -2,13 +2,14 @@ import { Anthropic } from "@anthropic-ai/sdk"
 import OpenAI from "openai"
 
 import {
+	type ModelInfo,
 	deepSeekModels,
 	deepSeekDefaultModelId,
 	DEEP_SEEK_DEFAULT_TEMPERATURE,
 	OPENAI_AZURE_AI_INFERENCE_PATH,
 } from "@roo-code/types"
 
-import type { ApiHandlerOptions } from "../../shared/api"
+import { type ApiHandlerOptions, getModelMaxOutputTokens, shouldUseReasoningEffort } from "../../shared/api"
 
 import { ApiStream, ApiStreamUsageChunk } from "../transform/stream"
 import { getModelParams } from "../transform/model-params"
@@ -17,9 +18,22 @@ import { convertToR1Format } from "../transform/r1-format"
 import { OpenAiHandler } from "./openai"
 import type { ApiHandlerCreateMessageMetadata } from "../index"
 
-// Custom interface for DeepSeek params to support thinking mode
-type DeepSeekChatCompletionParams = OpenAI.Chat.ChatCompletionCreateParamsStreaming & {
+// Custom interface for DeepSeek params to support thinking mode and reasoning effort.
+// DeepSeek accepts "max" for reasoning_effort, which is not part of OpenAI's type,
+// so we omit the OpenAI field and redefine it with DeepSeek's accepted values.
+type DeepSeekChatCompletionParams = Omit<OpenAI.Chat.ChatCompletionCreateParamsStreaming, "reasoning_effort"> & {
 	thinking?: { type: "enabled" | "disabled" }
+	reasoning_effort?: "low" | "high" | "max"
+	max_tokens?: number
+}
+
+// Maps the extension's reasoning effort values to DeepSeek's accepted values.
+// DeepSeek only accepts "low" | "high" | "max", so we fold "minimal" into "low"
+// and "xhigh" into "max". "medium", "high", and unset values map to "high".
+function mapDeepSeekReasoningEffort(effort?: string): "low" | "high" | "max" {
+	if (effort === "low" || effort === "minimal") return "low"
+	if (effort === "xhigh") return "max"
+	return "high"
 }
 
 export class DeepSeekHandler extends OpenAiHandler {
@@ -47,20 +61,29 @@ export class DeepSeekHandler extends OpenAiHandler {
 		metadata?: ApiHandlerCreateMessageMetadata,
 	): ApiStream {
 		const modelId = this.options.apiModelId ?? deepSeekDefaultModelId
-		const { info: modelInfo } = this.getModel()
+		const modelInfo = this.getModel().info as ModelInfo
 
-		// Check if this is a thinking-enabled model (deepseek-reasoner)
-		const isThinkingModel = modelId.includes("deepseek-reasoner")
+		// V4 thinking models advertise explicit reasoning effort support.
+		const isThinkingModel = !!modelInfo.supportsReasoningEffort
+		const useReasoning = shouldUseReasoningEffort({ model: modelInfo, settings: this.options })
 
-		// Convert messages to R1 format (merges consecutive same-role messages)
-		// This is required for DeepSeek which does not support successive messages with the same role
-		// For thinking models (deepseek-reasoner), enable mergeToolResultText to preserve reasoning_content
-		// during tool call sequences. Without this, environment_details text after tool_results would
-		// create user messages that cause DeepSeek to drop all previous reasoning_content.
+		// Legacy reasoner (V3.2) uses the old user-wrapped system prompt path.
+		const isLegacyReasoner = modelId.includes("deepseek-reasoner")
+
+		// Convert messages to R1 format (merges consecutive same-role messages).
+		// This is required for DeepSeek which does not support successive messages with the same role.
+		// For thinking models (V4 and legacy reasoner), enable mergeToolResultText to preserve
+		// reasoning_content during tool call sequences. Without this, environment_details text after
+		// tool_results would create user messages that cause DeepSeek to drop all previous reasoning_content.
 		// See: https://api-docs.deepseek.com/guides/thinking_mode
-		const convertedMessages = convertToR1Format([{ role: "user", content: systemPrompt }, ...messages], {
-			mergeToolResultText: isThinkingModel,
-		})
+		const convertedMessages: OpenAI.Chat.ChatCompletionMessageParam[] = isLegacyReasoner
+			? convertToR1Format([{ role: "user", content: systemPrompt }, ...messages], {
+					mergeToolResultText: true,
+				})
+			: [
+					{ role: "system", content: systemPrompt },
+					...convertToR1Format(messages, { mergeToolResultText: isThinkingModel }),
+				]
 
 		const requestOptions: DeepSeekChatCompletionParams = {
 			model: modelId,
@@ -68,8 +91,22 @@ export class DeepSeekHandler extends OpenAiHandler {
 			messages: convertedMessages,
 			stream: true as const,
 			stream_options: { include_usage: true },
-			// Enable thinking mode for deepseek-reasoner or when tools are used with thinking model
-			...(isThinkingModel && { thinking: { type: "enabled" } }),
+			// V4 thinking models support an explicit thinking toggle and reasoning effort.
+			...(isThinkingModel && { thinking: useReasoning ? { type: "enabled" } : { type: "disabled" } }),
+			...(isThinkingModel &&
+				useReasoning && {
+					reasoning_effort: mapDeepSeekReasoningEffort(
+						this.options.reasoningEffort ?? modelInfo.reasoningEffort,
+					),
+				}),
+			// DeepSeek V4 uses max_tokens (not max_completion_tokens).
+			max_tokens:
+				getModelMaxOutputTokens({
+					modelId,
+					model: modelInfo,
+					settings: this.options,
+					format: "openai",
+				}) ?? undefined,
 			...(metadata?.tools && { tools: this.convertToolsForOpenAI(metadata.tools) }),
 			...(metadata?.tool_choice && { tool_choice: metadata.tool_choice }),
 			...(metadata?.toolProtocol === "native" && {
@@ -77,16 +114,13 @@ export class DeepSeekHandler extends OpenAiHandler {
 			}),
 		}
 
-		// Add max_tokens if needed
-		this.addMaxTokensIfNeeded(requestOptions, modelInfo)
-
 		// Check if base URL is Azure AI Inference (for DeepSeek via Azure)
 		const isAzureAiInference = this._isAzureAiInference(this.options.deepSeekBaseUrl)
 
 		let stream
 		try {
 			stream = await this.client.chat.completions.create(
-				requestOptions,
+				requestOptions as unknown as OpenAI.Chat.ChatCompletionCreateParamsStreaming,
 				isAzureAiInference ? { path: OPENAI_AZURE_AI_INFERENCE_PATH } : {},
 			)
 		} catch (error) {
