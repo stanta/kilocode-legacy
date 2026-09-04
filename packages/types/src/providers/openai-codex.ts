@@ -25,6 +25,25 @@ export const openAiCodexDefaultModelId: OpenAiCodexModelId = "gpt-5.5"
  */
 export const openAiCodexModels = {
 	// kilocode_change start
+	"gpt-6-astra": {
+		maxTokens: 128000,
+		contextWindow: 1_050_000,
+		supportsNativeTools: true,
+		defaultToolProtocol: "native",
+		includedTools: ["apply_patch"],
+		excludedTools: ["apply_diff", "write_to_file"],
+		supportsImages: true,
+		supportsComputerUse: true,
+		supportsPromptCache: true,
+		supportsReasoningEffort: ["low", "medium", "high", "xhigh"],
+		reasoningEffort: "medium",
+		supportsVerbosity: true,
+		// Subscription-based: no per-token costs
+		inputPrice: 0,
+		outputPrice: 0,
+		supportsTemperature: false,
+		description: "GPT-6 Astra: OpenAI's most capable model for complex end-to-end work via ChatGPT subscription",
+	},
 	"gpt-5.6-sol": {
 		maxTokens: 128000,
 		contextWindow: 1_050_000,

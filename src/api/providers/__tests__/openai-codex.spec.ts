@@ -4,6 +4,7 @@ import { OpenAiCodexHandler } from "../openai-codex"
 
 describe("OpenAiCodexHandler.getModel", () => {
 	it.each([
+		"gpt-6-astra",
 		"gpt-5.6-sol",
 		"gpt-5.6-terra",
 		"gpt-5.6-luna",
