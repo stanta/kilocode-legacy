@@ -76,6 +76,8 @@ export const shouldUseReasoningEffort = ({
 		| "low"
 		| "medium"
 		| "high"
+		| "xhigh"
+		| "max"
 		| undefined
 
 	// "disable" explicitly omits reasoning

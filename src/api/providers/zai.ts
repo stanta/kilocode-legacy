@@ -20,6 +20,7 @@ import { BaseOpenAiCompatibleProvider } from "./base-openai-compatible-provider"
 // Custom interface for Z.ai params to support thinking mode
 type ZAiChatCompletionParams = OpenAI.Chat.ChatCompletionCreateParamsStreaming & {
 	thinking?: { type: "enabled" | "disabled" }
+	reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max"
 }
 
 export class ZAiHandler extends BaseOpenAiCompatibleProvider<string> {
@@ -57,9 +58,9 @@ export class ZAiHandler extends BaseOpenAiCompatibleProvider<string> {
 		const isThinkingModel = Array.isArray(info.supportsReasoningEffort)
 
 		if (isThinkingModel) {
-			// For thinking-enabled models, thinking is ON by default in the API.
-			// We need to explicitly disable it when reasoning is off.
-			const useReasoning = shouldUseReasoningEffort({ model: info, settings: this.options })
+			// GLM-5.3 requires reasoning; earlier Z.ai thinking models allow users to turn it off.
+			const useReasoning =
+				info.requiredReasoningEffort || shouldUseReasoningEffort({ model: info, settings: this.options })
 
 			// Create the stream with our custom thinking parameter
 			return this.createStreamWithThinking(systemPrompt, messages, metadata, useReasoning)
@@ -91,6 +92,7 @@ export class ZAiHandler extends BaseOpenAiCompatibleProvider<string> {
 			}) ?? undefined
 
 		const temperature = this.options.modelTemperature ?? this.defaultTemperature
+		const reasoningEffort = this.getReasoningEffort(info)
 
 		// Use Z.ai format to preserve reasoning_content and merge post-tool text into tool messages
 		const convertedMessages = convertToZAiFormat(messages, { mergeToolResultText: true })
@@ -104,6 +106,7 @@ export class ZAiHandler extends BaseOpenAiCompatibleProvider<string> {
 			stream_options: { include_usage: true },
 			// Thinking is ON by default, so we explicitly disable when needed.
 			thinking: useReasoning ? { type: "enabled" } : { type: "disabled" },
+			...(info.requiredReasoningEffort && reasoningEffort && { reasoning_effort: reasoningEffort }),
 			...(metadata?.tools && { tools: this.convertToolsForOpenAI(metadata.tools) }),
 			...(metadata?.tool_choice && { tool_choice: metadata.tool_choice }),
 			...(metadata?.toolProtocol === "native" && {
@@ -112,6 +115,19 @@ export class ZAiHandler extends BaseOpenAiCompatibleProvider<string> {
 		}
 
 		return this.client.chat.completions.create(params)
+	}
+
+	private getReasoningEffort(info: ModelInfo): ZAiChatCompletionParams["reasoning_effort"] | undefined {
+		const selectedEffort = this.options.reasoningEffort ?? info.reasoningEffort
+		const supportedEfforts = Array.isArray(info.supportsReasoningEffort) ? info.supportsReasoningEffort : []
+
+		if (!selectedEffort || !supportedEfforts.includes(selectedEffort)) {
+			return undefined
+		}
+
+		return ["low", "medium", "high", "xhigh", "max"].includes(selectedEffort)
+			? (selectedEffort as ZAiChatCompletionParams["reasoning_effort"])
+			: undefined
 	}
 	// kilocode_change end
 }
