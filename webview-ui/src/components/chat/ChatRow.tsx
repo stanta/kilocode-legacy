@@ -204,8 +204,16 @@ export const ChatRowContent = ({
 	const { t, i18n } = useTranslation()
 
 	// kilocode_change: add showTimestamps
-	const { mcpServers, alwaysAllowMcp, currentCheckpoint, mode, apiConfiguration, clineMessages, showTimestamps } =
-		useExtensionState()
+	const {
+		mcpServers,
+		alwaysAllowMcp,
+		currentCheckpoint,
+		currentTaskItem,
+		mode,
+		apiConfiguration,
+		clineMessages,
+		showTimestamps,
+	} = useExtensionState()
 	const { info: model } = useSelectedModel(apiConfiguration)
 	const [isEditing, setIsEditing] = useState(false)
 	const [editedContent, setEditedContent] = useState("")
@@ -1524,7 +1532,7 @@ export const ChatRowContent = ({
 							{
 								// kilocode_change start
 								!message.partial && enableCheckpoints !== false && commitRange ? (
-									<SeeNewChangesButtons commitRange={commitRange} />
+									<SeeNewChangesButtons commitRange={commitRange} taskId={currentTaskItem?.id} />
 								) : (
 									<></>
 								)
@@ -1537,6 +1545,7 @@ export const ChatRowContent = ({
 				case "checkpoint_saved":
 					return (
 						<CheckpointSaved
+							taskId={currentTaskItem?.id}
 							ts={message.ts!}
 							commitHash={message.text!}
 							currentHash={currentCheckpoint}

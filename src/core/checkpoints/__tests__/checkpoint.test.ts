@@ -4,6 +4,7 @@ import { ClineProvider } from "../../webview/ClineProvider"
 import { checkpointSave, checkpointRestore, checkpointDiff, getCheckpointService } from "../index"
 import { MessageManager } from "../../message-manager"
 import * as vscode from "vscode"
+import { WorkspaceCheckpointCoordinator } from "../../../services/checkpoints"
 
 // Mock vscode
 vi.mock("vscode", () => ({
@@ -113,6 +114,7 @@ describe("Checkpoint functionality", () => {
 
 	afterEach(() => {
 		vi.clearAllMocks()
+		WorkspaceCheckpointCoordinator.resetForTests()
 	})
 
 	describe("checkpointSave", () => {
@@ -225,7 +227,12 @@ describe("Checkpoint functionality", () => {
 		})
 
 		it("should restore checkpoint for delete operation", async () => {
+			const broadcastSpy = vi.spyOn(WorkspaceCheckpointCoordinator, "broadcastRestore")
+			const lockSpy = vi
+				.spyOn(WorkspaceCheckpointCoordinator, "withWorkspaceLock")
+				.mockImplementation(async (_workspacePath, operation) => await operation())
 			await checkpointRestore(mockTask, {
+				taskId: "test-task-id",
 				ts: 2,
 				commitHash: "abc123",
 				mode: "restore",
@@ -238,10 +245,19 @@ describe("Checkpoint functionality", () => {
 			])
 			expect(mockTask.overwriteClineMessages).toHaveBeenCalledWith([{ ts: 1, say: "user", text: "Message 1" }])
 			expect(mockProvider.cancelTask).toHaveBeenCalled()
+			expect(lockSpy).toHaveBeenCalled()
+			expect(broadcastSpy).toHaveBeenCalledWith("/test/workspace", {
+				sourceTaskId: "test-task-id",
+				commitHash: "abc123",
+			})
 		})
 
 		it("should restore checkpoint for edit operation", async () => {
+			vi.spyOn(WorkspaceCheckpointCoordinator, "withWorkspaceLock").mockImplementation(
+				async (_workspacePath, operation) => await operation(),
+			)
 			await checkpointRestore(mockTask, {
+				taskId: "test-task-id",
 				ts: 2,
 				commitHash: "abc123",
 				mode: "restore",
@@ -261,7 +277,11 @@ describe("Checkpoint functionality", () => {
 		})
 
 		it("should handle preview mode without modifying messages", async () => {
+			vi.spyOn(WorkspaceCheckpointCoordinator, "withWorkspaceLock").mockImplementation(
+				async (_workspacePath, operation) => await operation(),
+			)
 			await checkpointRestore(mockTask, {
+				taskId: "test-task-id",
 				ts: 2,
 				commitHash: "abc123",
 				mode: "preview",
@@ -275,6 +295,7 @@ describe("Checkpoint functionality", () => {
 
 		it("should handle missing message gracefully", async () => {
 			await checkpointRestore(mockTask, {
+				taskId: "test-task-id",
 				ts: 999, // Non-existent timestamp
 				commitHash: "abc123",
 				mode: "restore",
@@ -284,9 +305,13 @@ describe("Checkpoint functionality", () => {
 		})
 
 		it("should disable checkpoints on error", async () => {
+			vi.spyOn(WorkspaceCheckpointCoordinator, "withWorkspaceLock").mockImplementation(
+				async (_workspacePath, operation) => await operation(),
+			)
 			mockCheckpointService.restoreCheckpoint.mockRejectedValue(new Error("Restore failed"))
 
 			await checkpointRestore(mockTask, {
+				taskId: "test-task-id",
 				ts: 2,
 				commitHash: "abc123",
 				mode: "restore",

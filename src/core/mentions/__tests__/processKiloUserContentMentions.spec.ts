@@ -34,6 +34,12 @@ vi.mock("../../context/instructions/kilo-rules", () => ({
 	ensureLocalKilorulesDirExists: vi.fn(),
 }))
 
+vi.mock("vscode", () => ({
+	commands: {
+		executeCommand: vi.fn(),
+	},
+}))
+
 describe("processKiloUserContentMentions - slash command regression", () => {
 	const mockContext = {} as vscode.ExtensionContext
 	const mockUrlContentFetcher = {} as UrlContentFetcher
@@ -53,6 +59,7 @@ describe("processKiloUserContentMentions - slash command regression", () => {
 			processedText: text,
 			needsRulesFileCheck: false,
 		}))
+		vi.mocked(vscode.commands.executeCommand).mockResolvedValue(undefined)
 
 		vi.mocked(refreshWorkflowToggles).mockResolvedValue({
 			localWorkflowToggles: {},
@@ -186,6 +193,88 @@ describe("processKiloUserContentMentions - slash command regression", () => {
 			expect(parseMentions).not.toHaveBeenCalled()
 			// parseKiloSlashCommands should not be called
 			expect(parseKiloSlashCommands).not.toHaveBeenCalled()
+		})
+
+		it("should execute export all sessions command once and return deterministic user-visible text", async () => {
+			vi.mocked(parseKiloSlashCommands).mockResolvedValue({
+				processedText: "<user_message></user_message>",
+				needsRulesFileCheck: false,
+				exportAllSessionsRequested: true,
+			})
+
+			const userContent = [
+				{
+					type: "tool_result" as const,
+					tool_use_id: "call_export",
+					content: [
+						{ type: "text" as const, text: "<user_message>/export_all_sessions</user_message>" },
+						{ type: "text" as const, text: "<user_message>/export_all_sessions again</user_message>" },
+					],
+				},
+			]
+
+			const [result] = await processKiloUserContentMentions({
+				...defaultParams,
+				userContent,
+			})
+
+			expect(vscode.commands.executeCommand).toHaveBeenCalledTimes(1)
+			expect(vscode.commands.executeCommand).toHaveBeenCalledWith("kilo-code.exportAllSessions")
+			expect(result[0]).toEqual({
+				type: "tool_result",
+				tool_use_id: "call_export",
+				content: [
+					{
+						type: "text",
+						text: "<user_message></user_message>\nExport all sessions command has been opened.",
+					},
+					{
+						type: "text",
+						text: "<user_message></user_message>\nExport all sessions command has been opened.",
+					},
+				],
+			})
+		})
+
+		it("should execute export all dialogs command once and return deterministic user-visible text", async () => {
+			vi.mocked(parseKiloSlashCommands).mockResolvedValue({
+				processedText: "<user_message></user_message>",
+				needsRulesFileCheck: false,
+				exportAllDialogsRequested: true,
+			})
+
+			const userContent = [
+				{
+					type: "tool_result" as const,
+					tool_use_id: "call_export_dialogs",
+					content: [
+						{ type: "text" as const, text: "<user_message>/export_all_dialogs</user_message>" },
+						{ type: "text" as const, text: "<user_message>/export_all_dialogs again</user_message>" },
+					],
+				},
+			]
+
+			const [result] = await processKiloUserContentMentions({
+				...defaultParams,
+				userContent,
+			})
+
+			expect(vscode.commands.executeCommand).toHaveBeenCalledTimes(1)
+			expect(vscode.commands.executeCommand).toHaveBeenCalledWith("kilo-code.exportAllDialogs")
+			expect(result[0]).toEqual({
+				type: "tool_result",
+				tool_use_id: "call_export_dialogs",
+				content: [
+					{
+						type: "text",
+						text: "<user_message></user_message>\nExport all dialogs command has been opened.",
+					},
+					{
+						type: "text",
+						text: "<user_message></user_message>\nExport all dialogs command has been opened.",
+					},
+				],
+			})
 		})
 	})
 })

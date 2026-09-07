@@ -201,8 +201,17 @@ export function convertToR1Format(
 					role: "assistant",
 					content: textParts.length > 0 ? textParts.join("\n") : null,
 					...(toolCalls.length > 0 && { tool_calls: toolCalls }),
-					// Preserve reasoning_content for DeepSeek interleaved thinking
-					...(finalReasoning && { reasoning_content: finalReasoning }),
+					// kilocode_change start
+					// Preserve reasoning_content for DeepSeek interleaved thinking.
+					// DeepSeek requires reasoning_content to be passed back on assistant
+					// messages with tool_calls, even when cross-provider history has no
+					// actual reasoning block to preserve.
+					...(finalReasoning
+						? { reasoning_content: finalReasoning }
+						: toolCalls.length > 0
+							? { reasoning_content: "" }
+							: {}),
+					// kilocode_change end
 				}
 
 				// Check if we can merge with the last message (only if no tool calls)

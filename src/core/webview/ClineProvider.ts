@@ -37,6 +37,7 @@ import {
 	type ExtensionMessage,
 	type ExtensionState,
 	type MarketplaceInstalledMetadata,
+	PROVIDER_SETTINGS_KEYS,
 	RooCodeEventName,
 	TelemetryEventName, // kilocode_change
 	requestyDefaultModelId,
@@ -48,6 +49,7 @@ import {
 	DEFAULT_MODES,
 	DEFAULT_CHECKPOINT_TIMEOUT_SECONDS,
 	getModelId,
+	withModelId, // kilocode_change
 } from "@roo-code/types"
 import { aggregateTaskCostsRecursive, type AggregatedCosts } from "./aggregateTaskCosts"
 import { TelemetryService } from "@roo-code/telemetry"
@@ -73,6 +75,7 @@ import { McpHub } from "../../services/mcp/McpHub"
 import { McpServerManager } from "../../services/mcp/McpServerManager"
 import { MarketplaceManager } from "../../services/marketplace"
 import { ShadowCheckpointService } from "../../services/checkpoints/ShadowCheckpointService"
+import { WorkspaceCheckpointCoordinator } from "../../services/checkpoints"
 import { CodeIndexManager } from "../../services/code-index/manager"
 import type { IndexProgressUpdate } from "../../services/code-index/interfaces/manager"
 import { MdmService } from "../../services/mdm/MdmService"
@@ -144,6 +147,14 @@ interface PendingEditOperation {
 	createdAt: number
 }
 
+// kilocode_change start: per-window runtime provider profile snapshot
+export interface RuntimeProviderProfileSnapshot {
+	currentMode: string
+	currentApiConfigName: string
+	apiConfiguration: ProviderSettings
+}
+// kilocode_change end
+
 export class ClineProvider
 	extends EventEmitter<TaskProviderEvents>
 	implements vscode.WebviewViewProvider, TelemetryPropertiesProvider, TaskProviderLike
@@ -174,6 +185,11 @@ export class ClineProvider
 	private recentTasksCache?: string[]
 	private pendingOperations: Map<string, PendingEditOperation> = new Map()
 	private static readonly PENDING_OPERATION_TIMEOUT_MS = 30000 // 30 seconds
+	// kilocode_change start: each provider/window owns its active chat runtime selection
+	private runtimeProviderProfile?: RuntimeProviderProfileSnapshot
+	private workspaceRestoreUnsubscribe?: () => void
+	private staleWorkspaceRestore?: { sourceTaskId: string; commitHash: string; acknowledged: boolean }
+	// kilocode_change end
 
 	private cloudOrganizationsCache: CloudOrganizationMembership[] | null = null
 	private cloudOrganizationsCacheTimestamp: number | null = null
@@ -196,6 +212,7 @@ export class ClineProvider
 		this.currentWorkspacePath = getWorkspacePath()
 
 		ClineProvider.activeInstances.add(this)
+		this.subscribeToWorkspaceRestoreEvents()
 
 		this.mdmService = mdmService
 		this.updateGlobalState("codebaseIndexModels", EMBEDDING_MODEL_PROFILES)
@@ -341,6 +358,276 @@ export class ClineProvider
 		// kilocode_change end
 	}
 
+	// kilocode_change start: runtime provider profile isolation helpers
+	private ensureRuntimeProviderProfileInitialized(): RuntimeProviderProfileSnapshot {
+		if (this.runtimeProviderProfile) {
+			return this.runtimeProviderProfile
+		}
+
+		const providerSettings = this.contextProxy.getProviderSettings()
+		const apiProvider: ProviderName = providerSettings.apiProvider ?? "kilocode"
+		const currentApiConfigName = this.contextProxy.getValue("currentApiConfigName") ?? "default"
+		const currentMode = this.contextProxy.getValue("mode") ?? defaultModeSlug
+		const apiConfiguration: ProviderSettings = { ...providerSettings, apiProvider }
+
+		this.runtimeProviderProfile = {
+			currentMode,
+			currentApiConfigName,
+			apiConfiguration,
+		}
+
+		return this.runtimeProviderProfile
+	}
+
+	private setRuntimeProviderProfile(
+		currentApiConfigName: string,
+		apiConfiguration: ProviderSettings,
+		currentMode?: string,
+	): void {
+		const apiProvider: ProviderName = apiConfiguration.apiProvider ?? "kilocode"
+		this.runtimeProviderProfile = {
+			currentMode:
+				currentMode ??
+				this.runtimeProviderProfile?.currentMode ??
+				this.contextProxy.getValue("mode") ??
+				defaultModeSlug,
+			currentApiConfigName,
+			apiConfiguration: { ...apiConfiguration, apiProvider },
+		}
+	}
+
+	private setRuntimeMode(mode: string): void {
+		const snapshot = this.ensureRuntimeProviderProfileInitialized()
+		this.runtimeProviderProfile = { ...snapshot, currentMode: mode }
+	}
+
+	public getRuntimeProviderProfile(): RuntimeProviderProfileSnapshot {
+		const snapshot = this.ensureRuntimeProviderProfileInitialized()
+		return {
+			currentMode: snapshot.currentMode,
+			currentApiConfigName: snapshot.currentApiConfigName,
+			apiConfiguration: { ...snapshot.apiConfiguration },
+		}
+	}
+
+	private async resolveProviderProfileForRuntime(
+		args: { name: string } | { id: string },
+	): Promise<ProviderSettings & { name: string; id?: string }> {
+		const resolver = this.providerSettingsManager.resolveProfile?.bind(this.providerSettingsManager)
+		return resolver ? await resolver(args) : await this.providerSettingsManager.getProfile(args)
+	}
+
+	private async applyRuntimeProviderProfile(
+		name: string,
+		providerSettings: ProviderSettings,
+		options: { persistTaskHistory?: boolean; forceRebuild?: boolean } = {},
+	): Promise<void> {
+		this.setRuntimeProviderProfile(name, providerSettings)
+		const task = this.getCurrentTask()
+		if (task) {
+			const mode = await this.getTaskRuntimeMode(task)
+			this.setTaskSessionModeBinding(task, {
+				mode,
+				apiConfigName: name,
+				apiConfiguration: providerSettings,
+				toolProtocol: this.getTaskSessionRuntimeConfig(task).toolProtocol,
+				source: "profile-switch",
+			})
+			this.setRuntimeProviderProfile(name, providerSettings, mode)
+		}
+
+		this.updateTaskApiHandlerIfNeeded(providerSettings, { forceRebuild: options.forceRebuild ?? true })
+
+		if (options.persistTaskHistory ?? true) {
+			await this.persistStickyProviderProfileToCurrentTask(name)
+		}
+
+		await this.postStateToWebview()
+		await TelemetryService.instance.updateIdentity(providerSettings.kilocodeToken ?? "")
+
+		if (providerSettings.apiProvider) {
+			this.emit(RooCodeEventName.ProviderProfileChanged, { name, provider: providerSettings.apiProvider })
+		}
+	}
+
+	public async getEffectiveApiConfiguration(taskId?: string): Promise<ProviderSettings> {
+		const currentTask = this.getCurrentTask()
+		if (!taskId || currentTask?.taskId === taskId) {
+			return {
+				...(currentTask
+					? this.getTaskSessionApiConfiguration(currentTask)
+					: this.getRuntimeProviderProfile().apiConfiguration),
+			}
+		}
+
+		try {
+			if (!taskId) {
+				return { ...this.getRuntimeProviderProfile().apiConfiguration }
+			}
+			const { historyItem } = await this.getTaskWithId(taskId, false)
+			const runtime = historyItem?.sessionRuntimeConfig
+			const currentMode = runtime?.currentMode ?? historyItem?.mode
+			const binding = currentMode ? runtime?.modeBindings?.[currentMode] : undefined
+			if (binding?.apiConfiguration) {
+				return { ...binding.apiConfiguration }
+			}
+
+			// Legacy history has no full session snapshot. Resolve the saved profile/mode default
+			// without activating it globally, preserving lazy migration until the task is opened.
+			if (historyItem?.apiConfigName) {
+				const {
+					name: _name,
+					id: _id,
+					...providerSettings
+				} = await this.resolveProviderProfileForRuntime({
+					name: historyItem.apiConfigName,
+				})
+				if (providerSettings.apiProvider) {
+					return providerSettings
+				}
+			}
+
+			if (currentMode) {
+				const modeConfigId = await this.providerSettingsManager.getModeConfigId(currentMode as Mode)
+				if (modeConfigId) {
+					const {
+						name: _name,
+						id: _id,
+						...providerSettings
+					} = await this.resolveProviderProfileForRuntime({
+						id: modeConfigId,
+					})
+					if (providerSettings.apiProvider) {
+						return providerSettings
+					}
+				}
+			}
+		} catch {
+			// Fall through to this provider/window runtime default.
+		}
+
+		return { ...this.getRuntimeProviderProfile().apiConfiguration }
+	}
+
+	private async refreshGlobalProviderProfileMetadata(): Promise<ProviderSettingsEntry[]> {
+		const listApiConfig = await this.providerSettingsManager.listConfig()
+		await this.updateGlobalState("listApiConfigMeta", listApiConfig)
+		return listApiConfig
+	}
+
+	private getTaskSessionRuntimeConfig(task: Task): NonNullable<HistoryItem["sessionRuntimeConfig"]> {
+		const taskWithRuntime = task as unknown as {
+			taskId: string
+			apiConfiguration?: ProviderSettings
+			getSessionRuntimeConfig?: Task["getSessionRuntimeConfig"]
+			_taskMode?: string
+			_taskApiConfigName?: string
+			taskMode?: string
+			taskApiConfigName?: string
+		}
+
+		if (typeof taskWithRuntime.getSessionRuntimeConfig === "function") {
+			return taskWithRuntime.getSessionRuntimeConfig()
+		}
+
+		const currentMode =
+			taskWithRuntime._taskMode ?? taskWithRuntime.taskMode ?? this.getRuntimeProviderProfile().currentMode
+		const apiConfiguration = {
+			...(taskWithRuntime.apiConfiguration ?? this.getRuntimeProviderProfile().apiConfiguration),
+		}
+		const apiConfigName =
+			taskWithRuntime._taskApiConfigName ??
+			taskWithRuntime.taskApiConfigName ??
+			this.getRuntimeProviderProfile().currentApiConfigName
+
+		return {
+			version: 1,
+			sessionId: taskWithRuntime.taskId,
+			taskId: taskWithRuntime.taskId,
+			currentMode,
+			modeBindings: {
+				[currentMode]: {
+					mode: currentMode,
+					apiConfigName,
+					apiConfiguration,
+					provider: apiConfiguration.apiProvider,
+					modelId: getModelId(apiConfiguration),
+					toolProtocol: apiConfiguration.toolProtocol,
+					updatedAt: Date.now(),
+					source: "fallback",
+				},
+			},
+			activeApiConfigName: apiConfigName,
+			activeProvider: apiConfiguration.apiProvider,
+			activeModelId: getModelId(apiConfiguration),
+			toolProtocol: apiConfiguration.toolProtocol,
+			updatedAt: Date.now(),
+			source: "fallback",
+		}
+	}
+
+	private getTaskSessionApiConfiguration(task: Task): ProviderSettings {
+		const taskWithRuntime = task as unknown as {
+			apiConfiguration?: ProviderSettings
+			getSessionApiConfiguration?: Task["getSessionApiConfiguration"]
+		}
+		return typeof taskWithRuntime.getSessionApiConfiguration === "function"
+			? taskWithRuntime.getSessionApiConfiguration()
+			: { ...(taskWithRuntime.apiConfiguration ?? this.getRuntimeProviderProfile().apiConfiguration) }
+	}
+
+	private async getTaskRuntimeMode(task: Task): Promise<string> {
+		const taskWithRuntime = task as unknown as {
+			getTaskMode?: Task["getTaskMode"]
+			_taskMode?: string
+			taskMode?: string
+		}
+
+		if (typeof taskWithRuntime.getTaskMode === "function") {
+			return taskWithRuntime.getTaskMode()
+		}
+
+		return taskWithRuntime._taskMode ?? taskWithRuntime.taskMode ?? this.getRuntimeProviderProfile().currentMode
+	}
+
+	private setTaskSessionModeBinding(
+		task: Task,
+		args: {
+			mode: string
+			apiConfigName?: string
+			apiConfiguration: ProviderSettings
+			toolProtocol?: NonNullable<HistoryItem["sessionRuntimeConfig"]>["toolProtocol"]
+			source?: NonNullable<HistoryItem["sessionRuntimeConfig"]>["source"]
+		},
+	): NonNullable<HistoryItem["sessionRuntimeConfig"]> {
+		const taskWithRuntime = task as unknown as {
+			apiConfiguration?: ProviderSettings
+			setSessionModeBinding?: Task["setSessionModeBinding"]
+			setTaskMode?: Task["setTaskMode"]
+			setTaskApiConfigName?: Task["setTaskApiConfigName"]
+			_taskMode?: string
+			_taskApiConfigName?: string
+		}
+
+		if (typeof taskWithRuntime.setSessionModeBinding === "function") {
+			return taskWithRuntime.setSessionModeBinding(args)
+		}
+
+		if (typeof taskWithRuntime.setTaskMode === "function") {
+			taskWithRuntime.setTaskMode(args.mode)
+		}
+
+		if (typeof taskWithRuntime.setTaskApiConfigName === "function") {
+			taskWithRuntime.setTaskApiConfigName(args.apiConfigName)
+		}
+
+		taskWithRuntime._taskMode = args.mode
+		taskWithRuntime._taskApiConfigName = args.apiConfigName
+		taskWithRuntime.apiConfiguration = { ...args.apiConfiguration }
+		return this.getTaskSessionRuntimeConfig(task)
+	}
+	// kilocode_change end
+
 	// kilocode_change start
 	/**
 	 * Initialize the auto-purge scheduler
@@ -348,7 +635,9 @@ export class ClineProvider
 	private async initializeAutoPurgeScheduler() {
 		try {
 			const { AutoPurgeScheduler } = await import("../../services/auto-purge")
-			this.autoPurgeScheduler = new AutoPurgeScheduler(this.contextProxy.globalStorageUri.fsPath)
+			this.autoPurgeScheduler = new AutoPurgeScheduler(this.contextProxy.globalStorageUri.fsPath, {
+				workspaceRoot: this.cwd,
+			})
 
 			// Start the scheduler with functions to get current settings and task history
 			this.autoPurgeScheduler.start(
@@ -452,14 +741,17 @@ export class ClineProvider
 
 			if (result.hasChanges) {
 				// Update list.
-				await this.updateGlobalState("listApiConfigMeta", await this.providerSettingsManager.listConfig())
+				await this.refreshGlobalProviderProfileMetadata()
 
 				if (result.activeProfileChanged && result.activeProfileId) {
 					// Reload full settings for new active profile.
 					const profile = await this.providerSettingsManager.getProfile({
 						id: result.activeProfileId,
 					})
-					await this.activateProviderProfile({ name: profile.name })
+					await this.activateProviderProfile(
+						{ name: profile.name },
+						{ persistGlobalDefault: true, persistModeConfig: true },
+					)
 				}
 
 				await this.postStateToWebview()
@@ -496,6 +788,15 @@ export class ClineProvider
 		// Add this cline instance into the stack that represents the order of
 		// all the called tasks.
 		this.clineStack.push(task)
+		// kilocode_change start: focusing a task activates its session runtime snapshot for this provider/window
+		const taskRuntime = this.getTaskSessionRuntimeConfig(task)
+		const taskApiConfiguration = this.getTaskSessionApiConfiguration(task)
+		this.setRuntimeProviderProfile(
+			taskRuntime.activeApiConfigName ?? this.getRuntimeProviderProfile().currentApiConfigName,
+			taskApiConfiguration,
+			taskRuntime.currentMode ?? defaultModeSlug,
+		)
+		// kilocode_change end
 		task.emit(RooCodeEventName.TaskFocused)
 
 		// Perform special setup provider specific tasks.
@@ -703,6 +1004,8 @@ export class ClineProvider
 		// kilocode_change end
 
 		this.log("Disposed all disposables")
+		this.workspaceRestoreUnsubscribe?.()
+		this.workspaceRestoreUnsubscribe = undefined
 		ClineProvider.activeInstances.delete(this)
 
 		// Clean up any event listeners attached to this provider
@@ -713,6 +1016,46 @@ export class ClineProvider
 
 	public static getVisibleInstance(): ClineProvider | undefined {
 		return findLast(Array.from(this.activeInstances), (instance) => instance.view?.visible === true)
+	}
+
+	private subscribeToWorkspaceRestoreEvents(): void {
+		this.workspaceRestoreUnsubscribe?.()
+		const workspacePath = this.currentWorkspacePath
+		if (!workspacePath) {
+			return
+		}
+
+		this.workspaceRestoreUnsubscribe = WorkspaceCheckpointCoordinator.subscribe(workspacePath, (event) => {
+			const currentTask = this.getCurrentTask()
+			if (!currentTask || currentTask.taskId === event.sourceTaskId) {
+				return
+			}
+
+			this.staleWorkspaceRestore = {
+				sourceTaskId: event.sourceTaskId,
+				commitHash: event.commitHash,
+				acknowledged: false,
+			}
+			void this.postStateToWebview()
+		})
+	}
+
+	public acknowledgeWorkspaceRestoreStaleness(): void {
+		if (!this.staleWorkspaceRestore) {
+			return
+		}
+
+		this.staleWorkspaceRestore = {
+			...this.staleWorkspaceRestore,
+			acknowledged: true,
+		}
+		void this.postStateToWebview()
+	}
+
+	public ensureWorkspaceRestoreAcknowledged(): void {
+		if (this.staleWorkspaceRestore && !this.staleWorkspaceRestore.acknowledged) {
+			throw new Error("Workspace restore requires acknowledgement before continuing")
+		}
 	}
 
 	public static async getInstance(): Promise<ClineProvider | undefined> {
@@ -965,30 +1308,42 @@ export class ClineProvider
 		}
 
 		// If the history item has a saved mode, restore it and its associated API configuration.
-		if (historyItem.mode) {
+		if (historyItem.mode || historyItem.sessionRuntimeConfig?.currentMode) {
 			// Validate that the mode still exists
+			const restoredMode = historyItem.sessionRuntimeConfig?.currentMode ?? historyItem.mode ?? defaultModeSlug
 			const customModes = await this.customModesManager.getCustomModes()
-			const modeExists = getModeBySlug(historyItem.mode, customModes) !== undefined
+			const modeExists = getModeBySlug(restoredMode, customModes) !== undefined
 
 			if (!modeExists) {
 				// Mode no longer exists, fall back to default mode.
 				this.log(
-					`Mode '${historyItem.mode}' from history no longer exists. Falling back to default mode '${defaultModeSlug}'.`,
+					`Mode '${restoredMode}' from history no longer exists. Falling back to default mode '${defaultModeSlug}'.`,
 				)
 				historyItem.mode = defaultModeSlug
+				if (historyItem.sessionRuntimeConfig) {
+					historyItem.sessionRuntimeConfig.currentMode = defaultModeSlug
+				}
 			}
+			const effectiveMode = modeExists ? restoredMode : defaultModeSlug
+			this.setRuntimeMode(effectiveMode)
 
-			await this.updateGlobalState("mode", historyItem.mode)
+			const sessionBinding = historyItem.sessionRuntimeConfig?.modeBindings?.[effectiveMode]
+			if (sessionBinding) {
+				this.setRuntimeProviderProfile(
+					sessionBinding.apiConfigName ??
+						historyItem.apiConfigName ??
+						this.getRuntimeProviderProfile().currentApiConfigName,
+					sessionBinding.apiConfiguration,
+					effectiveMode,
+				)
+			}
 
 			// Load the saved API config for the restored mode if it exists.
 			// Skip mode-based profile activation if historyItem.apiConfigName exists,
 			// since the task's specific provider profile will override it anyway.
-			if (!historyItem.apiConfigName) {
-				const savedConfigId = await this.providerSettingsManager.getModeConfigId(historyItem.mode)
-				const listApiConfig = await this.providerSettingsManager.listConfig()
-
-				// Update listApiConfigMeta first to ensure UI has latest data.
-				await this.updateGlobalState("listApiConfigMeta", listApiConfig)
+			if (!historyItem.apiConfigName && !sessionBinding) {
+				const savedConfigId = await this.providerSettingsManager.getModeConfigId(effectiveMode as Mode)
+				const listApiConfig = await this.refreshGlobalProviderProfileMetadata()
 
 				// If this mode has a saved config, use it.
 				if (savedConfigId) {
@@ -1000,11 +1355,20 @@ export class ClineProvider
 							// In CLI mode, the ProviderSettingsManager may return empty default profiles
 							// that only contain 'id' and 'name' fields. Activating such a profile would
 							// overwrite the CLI's working API configuration with empty settings.
-							const fullProfile = await this.providerSettingsManager.getProfile({ name: profile.name })
-							const hasActualSettings = !!fullProfile.apiProvider
+							const {
+								name,
+								id: _id,
+								...providerSettings
+							} = await this.resolveProviderProfileForRuntime({
+								name: profile.name,
+							})
+							const hasActualSettings = !!providerSettings.apiProvider
 
 							if (hasActualSettings) {
-								await this.activateProviderProfile({ name: profile.name })
+								await this.applyRuntimeProviderProfile(name, providerSettings, {
+									persistTaskHistory: false,
+								})
+								this.setRuntimeMode(effectiveMode)
 							} else {
 								// The task will continue with the current/default configuration.
 							}
@@ -1025,18 +1389,25 @@ export class ClineProvider
 		// If the history item has a saved API config name (provider profile), restore it.
 		// This overrides any mode-based config restoration above, because the task's
 		// specific provider profile takes precedence over mode defaults.
-		if (historyItem.apiConfigName) {
-			const listApiConfig = await this.providerSettingsManager.listConfig()
-			// Keep global state/UI in sync with latest profiles for parity with mode restoration above.
-			await this.updateGlobalState("listApiConfigMeta", listApiConfig)
+		if (
+			historyItem.apiConfigName &&
+			!historyItem.sessionRuntimeConfig?.modeBindings?.[
+				historyItem.sessionRuntimeConfig.currentMode ?? historyItem.mode ?? defaultModeSlug
+			]
+		) {
+			const listApiConfig = await this.refreshGlobalProviderProfileMetadata()
 			const profile = listApiConfig.find(({ name }) => name === historyItem.apiConfigName)
 
 			if (profile?.name) {
 				try {
-					await this.activateProviderProfile(
-						{ name: profile.name },
-						{ persistModeConfig: false, persistTaskHistory: false },
-					)
+					const {
+						name,
+						id: _id,
+						...providerSettings
+					} = await this.resolveProviderProfileForRuntime({
+						name: profile.name,
+					})
+					await this.applyRuntimeProviderProfile(name, providerSettings, { persistTaskHistory: false })
 				} catch (error) {
 					// Log the error but continue with task restoration.
 					this.log(
@@ -1111,6 +1482,15 @@ export class ClineProvider
 
 			// Replace the task in the stack
 			this.clineStack[stackIndex] = task
+			// kilocode_change start: rehydrating a task activates its session runtime snapshot for this provider/window
+			const taskRuntime = this.getTaskSessionRuntimeConfig(task)
+			const taskApiConfiguration = this.getTaskSessionApiConfiguration(task)
+			this.setRuntimeProviderProfile(
+				taskRuntime.activeApiConfigName ?? this.getRuntimeProviderProfile().currentApiConfigName,
+				taskApiConfiguration,
+				taskRuntime.currentMode ?? defaultModeSlug,
+			)
+			// kilocode_change end
 			task.emit(RooCodeEventName.TaskFocused)
 
 			// Perform preparation tasks and set up event listeners
@@ -1419,10 +1799,51 @@ export class ClineProvider
 	 */
 	public async handleModeSwitch(newMode: Mode, options?: { reviewScope?: "uncommitted" | "branch" }) {
 		const task = this.getCurrentTask()
+		const listApiConfig = await this.refreshGlobalProviderProfileMetadata()
+		let nextApiConfigName = this.getRuntimeProviderProfile().currentApiConfigName
+		let nextProviderSettings = this.getRuntimeProviderProfile().apiConfiguration
+
+		const taskSessionRuntimeConfig = task ? this.getTaskSessionRuntimeConfig(task) : undefined
+		const existingBinding = taskSessionRuntimeConfig?.modeBindings?.[newMode]
+		if (existingBinding) {
+			nextApiConfigName = existingBinding.apiConfigName ?? nextApiConfigName
+			nextProviderSettings = existingBinding.apiConfiguration
+		} else {
+			const savedConfigId = await this.providerSettingsManager.getModeConfigId(newMode)
+			const profile = savedConfigId ? listApiConfig.find(({ id }) => id === savedConfigId) : undefined
+			if (profile?.name) {
+				try {
+					const {
+						name,
+						id: _id,
+						...providerSettings
+					} = await this.resolveProviderProfileForRuntime({
+						name: profile.name,
+					})
+					if (providerSettings.apiProvider) {
+						nextApiConfigName = name
+						nextProviderSettings = providerSettings
+					}
+				} catch (error) {
+					this.log(
+						`Failed to seed API configuration for mode '${newMode}': ${error instanceof Error ? error.message : String(error)}`,
+					)
+				}
+			}
+		}
 
 		if (task) {
 			TelemetryService.instance.captureModeSwitch(task.taskId, newMode)
 			task.emit(RooCodeEventName.TaskModeSwitched, task.taskId, newMode)
+			this.setTaskSessionModeBinding(task, {
+				mode: newMode,
+				apiConfigName: nextApiConfigName,
+				apiConfiguration: nextProviderSettings,
+				toolProtocol: existingBinding?.toolProtocol ?? taskSessionRuntimeConfig?.toolProtocol,
+				source: existingBinding ? "mode-switch" : "global-default",
+			})
+			this.setRuntimeProviderProfile(nextApiConfigName, nextProviderSettings, newMode)
+			this.updateTaskApiHandlerIfNeeded(nextProviderSettings, { forceRebuild: true })
 
 			try {
 				// Update the task history with the new mode first.
@@ -1430,12 +1851,13 @@ export class ClineProvider
 				const taskHistoryItem = history.find((item) => item.id === task.taskId)
 
 				if (taskHistoryItem) {
-					taskHistoryItem.mode = newMode
-					await this.updateTaskHistory(taskHistoryItem)
+					await this.updateTaskHistory({
+						...taskHistoryItem,
+						mode: newMode,
+						apiConfigName: nextApiConfigName,
+						sessionRuntimeConfig: this.getTaskSessionRuntimeConfig(task),
+					})
 				}
-
-				// Only update the task's mode after successful persistence.
-				;(task as any)._taskMode = newMode
 			} catch (error) {
 				// If persistence fails, log the error but don't update the in-memory state.
 				this.log(
@@ -1446,53 +1868,11 @@ export class ClineProvider
 				// This ensures the in-memory state remains consistent with persisted state.
 				throw error
 			}
+		} else {
+			this.setRuntimeProviderProfile(nextApiConfigName, nextProviderSettings, newMode)
 		}
-
-		await this.updateGlobalState("mode", newMode)
 
 		this.emit(RooCodeEventName.ModeChanged, newMode)
-
-		// Load the saved API config for the new mode if it exists.
-		const savedConfigId = await this.providerSettingsManager.getModeConfigId(newMode)
-		const listApiConfig = await this.providerSettingsManager.listConfig()
-
-		// Update listApiConfigMeta first to ensure UI has latest data.
-		await this.updateGlobalState("listApiConfigMeta", listApiConfig)
-
-		// If this mode has a saved config, use it.
-		if (savedConfigId) {
-			const profile = listApiConfig.find(({ id }) => id === savedConfigId)
-
-			if (profile?.name) {
-				// Check if the profile has actual API configuration (not just an id).
-				// In CLI mode, the ProviderSettingsManager may return empty default profiles
-				// that only contain 'id' and 'name' fields. Activating such a profile would
-				// overwrite the CLI's working API configuration with empty settings.
-				// Skip activation if the profile has no apiProvider set - this indicates
-				// an unconfigured/empty profile.
-				const fullProfile = await this.providerSettingsManager.getProfile({ name: profile.name })
-				const hasActualSettings = !!fullProfile.apiProvider
-
-				if (hasActualSettings) {
-					await this.activateProviderProfile({ name: profile.name })
-				} else {
-					// The task will continue with the current/default configuration.
-				}
-			} else {
-				// The task will continue with the current/default configuration.
-			}
-		} else {
-			// If no saved config for this mode, save current config as default.
-			const currentApiConfigNameAfter = this.getGlobalState("currentApiConfigName")
-
-			if (currentApiConfigNameAfter) {
-				const config = listApiConfig.find((c) => c.name === currentApiConfigNameAfter)
-
-				if (config?.id) {
-					await this.providerSettingsManager.setModeConfig(newMode, config.id)
-				}
-			}
-		}
 
 		await this.postStateToWebview()
 
@@ -1552,7 +1932,15 @@ export class ClineProvider
 			task.updateApiConfiguration(providerSettings)
 		} else {
 			// No rebuild needed, just sync apiConfiguration
-			;(task as any).apiConfiguration = providerSettings
+			const sessionRuntimeConfig = this.getTaskSessionRuntimeConfig(task)
+			;(task as any).apiConfiguration = { ...providerSettings }
+			this.setTaskSessionModeBinding(task, {
+				mode: sessionRuntimeConfig.currentMode ?? defaultModeSlug,
+				apiConfigName: sessionRuntimeConfig.activeApiConfigName,
+				apiConfiguration: providerSettings,
+				toolProtocol: sessionRuntimeConfig.toolProtocol,
+				source: "profile-switch",
+			})
 		}
 	}
 
@@ -1572,6 +1960,7 @@ export class ClineProvider
 		name: string,
 		providerSettings: ProviderSettings,
 		activate: boolean = true,
+		options?: { persistGlobalDefault?: boolean; persistModeConfig?: boolean; persistTaskHistory?: boolean },
 	): Promise<string | undefined> {
 		try {
 			// TODO: Do we need to be calling `activateProfile`? It's not
@@ -1582,41 +1971,33 @@ export class ClineProvider
 			const id = await this.providerSettingsManager.saveConfig(name, providerSettings)
 
 			if (activate) {
-				const { mode } = await this.getState()
+				const currentTask = this.getCurrentTask()
+				const mode = (
+					currentTask
+						? this.getTaskSessionRuntimeConfig(currentTask).currentMode
+						: this.getRuntimeProviderProfile().currentMode
+				) as Mode
+				const persistGlobalDefault = options?.persistGlobalDefault ?? false
+				const persistModeConfig = options?.persistModeConfig ?? false
+				const persistTaskHistory = options?.persistTaskHistory ?? true
 
-				// These promises do the following:
-				// 1. Adds or updates the list of provider profiles.
-				// 2. Sets the current provider profile.
-				// 3. Sets the current mode's provider profile.
-				// 4. Copies the provider settings to the context.
-				//
-				// Note: 1, 2, and 4 can be done in one `ContextProxy` call:
-				// this.contextProxy.setValues({ ...providerSettings, listApiConfigMeta: ..., currentApiConfigName: ... })
-				// We should probably switch to that and verify that it works.
-				// I left the original implementation in just to be safe.
-				await Promise.all([
-					this.updateGlobalState("listApiConfigMeta", await this.providerSettingsManager.listConfig()),
-					this.updateGlobalState("currentApiConfigName", name),
-					this.providerSettingsManager.setModeConfig(mode, id),
-					this.contextProxy.setProviderSettings(providerSettings),
-				])
-
-				// Change the provider for the current task.
-				// TODO: We should rename `buildApiHandler` for clarity (e.g. `getProviderClient`).
-				const task = this.getCurrentTask()
-
-				if (task) {
-					task.api = buildApiHandler(providerSettings)
+				// kilocode_change start: chat/profile saves update this window runtime without mutating global defaults
+				const updatePromises: Promise<unknown>[] = [this.refreshGlobalProviderProfileMetadata()]
+				if (persistModeConfig) {
+					updatePromises.push(this.providerSettingsManager.setModeConfig(mode, id))
 				}
-
-				await TelemetryService.instance.updateIdentity(providerSettings.kilocodeToken ?? "") // kilocode_change
-
-				this.updateTaskApiHandlerIfNeeded(providerSettings, { forceRebuild: true })
-
-				// Keep the current task's sticky provider profile in sync with the newly-activated profile.
-				await this.persistStickyProviderProfileToCurrentTask(name)
+				if (persistGlobalDefault) {
+					updatePromises.push(this.updateGlobalState("currentApiConfigName", name))
+					updatePromises.push(this.contextProxy.setProviderSettings(providerSettings))
+				}
+				await Promise.all(updatePromises)
+				await this.applyRuntimeProviderProfile(name, providerSettings, {
+					forceRebuild: true,
+					persistTaskHistory,
+				})
+				// kilocode_change end
 			} else {
-				await this.updateGlobalState("listApiConfigMeta", await this.providerSettingsManager.listConfig())
+				await this.refreshGlobalProviderProfileMetadata()
 			}
 
 			await this.postStateToWebview()
@@ -1669,7 +2050,11 @@ export class ClineProvider
 			const taskHistoryItem = history.find((item) => item.id === task.taskId)
 
 			if (taskHistoryItem) {
-				await this.updateTaskHistory({ ...taskHistoryItem, apiConfigName })
+				await this.updateTaskHistory({
+					...taskHistoryItem,
+					apiConfigName,
+					sessionRuntimeConfig: task.getSessionRuntimeConfig(),
+				})
 			}
 		} catch (error) {
 			// If persistence fails, log the error but don't fail the profile switch.
@@ -1683,41 +2068,43 @@ export class ClineProvider
 
 	async activateProviderProfile(
 		args: { name: string } | { id: string },
-		options?: { persistModeConfig?: boolean; persistTaskHistory?: boolean },
+		options?: { persistModeConfig?: boolean; persistTaskHistory?: boolean; persistGlobalDefault?: boolean },
 	) {
-		const { name, id, ...providerSettings } = await this.providerSettingsManager.activateProfile(args)
+		// kilocode_change start: runtime path is isolated from global persisted defaults by default
+		const persistGlobalDefault = options?.persistGlobalDefault ?? false
+		const { name, id, ...providerSettings } = persistGlobalDefault
+			? await this.providerSettingsManager.activateProfile(args)
+			: await this.resolveProviderProfileForRuntime(args)
 
-		const persistModeConfig = options?.persistModeConfig ?? true
+		const persistModeConfig = options?.persistModeConfig ?? false
 		const persistTaskHistory = options?.persistTaskHistory ?? true
 
-		// See `upsertProviderProfile` for a description of what this is doing.
-		await Promise.all([
-			this.contextProxy.setValue("listApiConfigMeta", await this.providerSettingsManager.listConfig()),
-			this.contextProxy.setValue("currentApiConfigName", name),
-			this.contextProxy.setProviderSettings(providerSettings),
-		])
+		await this.refreshGlobalProviderProfileMetadata()
 
-		const { mode } = await this.getState()
+		if (persistGlobalDefault) {
+			await Promise.all([
+				this.contextProxy.setValue("currentApiConfigName", name),
+				this.contextProxy.setProviderSettings(providerSettings),
+			])
+			this.setRuntimeProviderProfile(name, providerSettings)
+		}
+
+		const currentTask = this.getCurrentTask()
+		const mode = (
+			currentTask
+				? this.getTaskSessionRuntimeConfig(currentTask).currentMode
+				: this.getRuntimeProviderProfile().currentMode
+		) as Mode
 
 		if (id && persistModeConfig) {
 			await this.providerSettingsManager.setModeConfig(mode, id)
 		}
 
-		// Change the provider for the current task.
-		this.updateTaskApiHandlerIfNeeded(providerSettings, { forceRebuild: true })
-
-		// Update the current task's sticky provider profile, unless this activation is
-		// being used purely as a non-persisting restoration (e.g., reopening a task from history).
-		if (persistTaskHistory) {
-			await this.persistStickyProviderProfileToCurrentTask(name)
-		}
-
-		await this.postStateToWebview()
-		await TelemetryService.instance.updateIdentity(providerSettings.kilocodeToken ?? "") // kilocode_change
-
-		if (providerSettings.apiProvider) {
-			this.emit(RooCodeEventName.ProviderProfileChanged, { name, provider: providerSettings.apiProvider })
-		}
+		await this.applyRuntimeProviderProfile(name, providerSettings, {
+			persistTaskHistory,
+			forceRebuild: true,
+		})
+		// kilocode_change end
 	}
 
 	async updateCustomInstructions(instructions?: string) {
@@ -1853,22 +2240,50 @@ export class ClineProvider
 
 	// kilocode_change start
 	async handleKiloCodeCallback(token: string) {
-		const kilocode: ProviderName = "kilocode"
-		let { apiConfiguration, currentApiConfigName = "default" } = await this.getState()
+		const { apiConfiguration, currentApiConfigName = "default" } = await this.getState()
+		const currentTask = this.getCurrentTask()
+		const sessionConfiguration = currentTask ? this.getTaskSessionApiConfiguration(currentTask) : undefined
+		// kilocode_change start - a Kilo Code session's model must not be selected through generic key ordering
+		const previousSessionModel =
+			sessionConfiguration?.apiProvider === "kilocode"
+				? sessionConfiguration.kilocodeModel
+				: sessionConfiguration
+					? getModelId(sessionConfiguration)
+					: undefined
+		// kilocode_change end
+		const configuredKiloCodeModel = apiConfiguration.kilocodeModel
+		const canRetainPreviousSessionModel =
+			sessionConfiguration?.apiProvider === "kilocode" &&
+			previousSessionModel !== undefined &&
+			previousSessionModel === sessionConfiguration.kilocodeModel
+		const kilocodeModel =
+			(canRetainPreviousSessionModel
+				? previousSessionModel
+				: (configuredKiloCodeModel ?? previousSessionModel)) ??
+			(await getKilocodeDefaultModel(token, apiConfiguration.kilocodeOrganizationId)).defaultModel
 
-		await this.upsertProviderProfile(currentApiConfigName, {
-			...apiConfiguration,
-			apiProvider: "kilocode",
-			kilocodeToken: token,
-		})
+		const migrateToKiloCode = (configuration: ProviderSettings): ProviderSettings => {
+			const migration = withModelId(
+				{
+					...configuration,
+					apiProvider: "kilocode",
+					kilocodeToken: token,
+				},
+				kilocodeModel,
+			)
+			if (!migration.ok) {
+				throw new Error(`Unable to select Kilo Code model '${kilocodeModel}': ${migration.error}`)
+			}
+			return migration.settings
+		}
+
+		await this.upsertProviderProfile(currentApiConfigName, migrateToKiloCode(apiConfiguration))
 
 		vscode.window.showInformationMessage("Kilo Code successfully configured!")
 
-		if (this.getCurrentTask()) {
-			this.getCurrentTask()!.api = buildApiHandler({
-				apiProvider: kilocode,
-				kilocodeToken: token,
-			})
+		if (currentTask && sessionConfiguration) {
+			// Task.updateApiConfiguration atomically rebuilds the handler and session runtime binding.
+			currentTask.updateApiConfiguration(migrateToKiloCode(sessionConfiguration))
 		}
 	}
 	// kilocode_change end
@@ -1908,7 +2323,7 @@ export class ClineProvider
 		if (historyItem) {
 			const { getTaskDirectoryPath } = await import("../../utils/storage")
 			const globalStoragePath = this.contextProxy.globalStorageUri.fsPath
-			const taskDirPath = await getTaskDirectoryPath(globalStoragePath, id)
+			const taskDirPath = await getTaskDirectoryPath(globalStoragePath, id, { workspaceRoot: this.cwd })
 			const apiConversationHistoryFilePath = path.join(taskDirPath, GlobalFileNames.apiConversationHistory)
 			const uiMessagesFilePath = path.join(taskDirPath, GlobalFileNames.uiMessages)
 			const fileExists = await fileExistsAtPath(apiConversationHistoryFilePath)
@@ -2051,6 +2466,7 @@ export class ClineProvider
 
 	async refreshWorkspace() {
 		this.currentWorkspacePath = getWorkspacePath()
+		this.subscribeToWorkspaceRestoreEvents()
 
 		await kilo_execIfExtension(() => {
 			if (this.currentWorkspacePath) {
@@ -2076,7 +2492,9 @@ export class ClineProvider
 	async postRulesDataToWebview() {
 		const workspacePath = this.cwd
 		if (workspacePath) {
-			const mode = this.contextProxy.getGlobalState("mode") as string | undefined
+			const mode =
+				this.getCurrentTask()?.getSessionRuntimeConfig().currentMode ??
+				this.getRuntimeProviderProfile().currentMode
 			this.postMessageToWebview({
 				type: "rulesData",
 				...(await getEnabledRules(workspacePath, this.contextProxy, this.context, mode)),
@@ -2404,6 +2822,7 @@ export class ClineProvider
 			clineMessages: this.getCurrentTask()?.clineMessages || [],
 			currentTaskTodos: this.getCurrentTask()?.todoList || [],
 			currentTaskCumulativeCost: this.getCurrentTask()?.getCumulativeTotalCost(), // kilocode_change
+			staleWorkspaceRestore: this.staleWorkspaceRestore,
 			messageQueue: this.getCurrentTask()?.messageQueueService?.messages,
 			taskHistoryFullLength: taskHistory.length, // kilocode_change
 			taskHistoryVersion: this.kiloCodeTaskHistoryVersion, // kilocode_change
@@ -2601,16 +3020,19 @@ export class ClineProvider
 		const stateValues = this.contextProxy.getValues()
 		const customModes = await this.customModesManager.getCustomModes()
 
-		// Determine apiProvider with the same logic as before.
-		const apiProvider: ProviderName = stateValues.apiProvider ? stateValues.apiProvider : "kilocode" // kilocode_change: fall back to kilocode
-
-		// Build the apiConfiguration object combining state values and secrets.
-		const providerSettings = this.contextProxy.getProviderSettings()
-
-		// Ensure apiProvider is set properly if not already in state
-		if (!providerSettings.apiProvider) {
-			providerSettings.apiProvider = apiProvider
+		// kilocode_change start: expose this provider/window's runtime profile instead of the global default
+		const runtimeProviderProfile = this.ensureRuntimeProviderProfileInitialized()
+		const currentTask = this.getCurrentTask()
+		const taskRuntimeConfig = currentTask ? this.getTaskSessionRuntimeConfig(currentTask) : undefined
+		const providerSettings = {
+			...(currentTask
+				? this.getTaskSessionApiConfiguration(currentTask)
+				: runtimeProviderProfile.apiConfiguration),
 		}
+		const currentRuntimeMode = taskRuntimeConfig?.currentMode ?? runtimeProviderProfile.currentMode
+		const currentRuntimeApiConfigName =
+			taskRuntimeConfig?.activeApiConfigName ?? runtimeProviderProfile.currentApiConfigName
+		// kilocode_change end
 
 		let organizationAllowList = ORGANIZATION_ALLOW_ALL
 
@@ -2747,12 +3169,12 @@ export class ClineProvider
 			terminalZshP10k: stateValues.terminalZshP10k ?? false,
 			terminalZdotdir: stateValues.terminalZdotdir ?? false,
 			terminalCompressProgressBar: stateValues.terminalCompressProgressBar ?? true,
-			mode: stateValues.mode ?? defaultModeSlug,
+			mode: currentRuntimeMode ?? defaultModeSlug,
 			language: stateValues.language ?? formatLanguage(vscode.env.language),
 			mcpEnabled: true, // kilocode_change: always true
 			enableMcpServerCreation: stateValues.enableMcpServerCreation ?? true,
 			mcpServers: this.mcpHub?.getAllServers() ?? [],
-			currentApiConfigName: stateValues.currentApiConfigName ?? "default",
+			currentApiConfigName: currentRuntimeApiConfigName ?? "default",
 			listApiConfigMeta: stateValues.listApiConfigMeta ?? [],
 			pinnedApiConfigs: stateValues.pinnedApiConfigs ?? {},
 			modeApiConfigs: stateValues.modeApiConfigs ?? ({} as Record<Mode, string>),
@@ -3192,7 +3614,29 @@ export class ClineProvider
 		configuration: RooCodeSettings = {},
 	): Promise<Task> {
 		if (configuration) {
-			await this.setValues(configuration)
+			const globalConfiguration: RooCodeSettings = {}
+			const runtimeConfiguration: RooCodeSettings = {}
+
+			for (const [key, value] of Object.entries(configuration) as Array<[string, unknown]>) {
+				if (PROVIDER_SETTINGS_KEYS.includes(key as keyof ProviderSettings) || key === "currentApiConfigName") {
+					;(runtimeConfiguration as Record<string, unknown>)[key] = value
+				} else {
+					;(globalConfiguration as Record<string, unknown>)[key] = value
+				}
+			}
+
+			const { currentApiConfigName, apiProvider } = runtimeConfiguration
+			await this.setValues(globalConfiguration)
+
+			// kilocode_change start: task-local configuration overrides this window runtime only
+			if (currentApiConfigName || apiProvider) {
+				const runtimeName = currentApiConfigName ?? this.getRuntimeProviderProfile().currentApiConfigName
+				this.setRuntimeProviderProfile(runtimeName, {
+					...this.getRuntimeProviderProfile().apiConfiguration,
+					...runtimeConfiguration,
+				})
+			}
+			// kilocode_change end
 
 			if (configuration.allowedCommands) {
 				await vscode.workspace
@@ -3216,13 +3660,13 @@ export class ClineProvider
 					)
 			}
 
-			if (configuration.currentApiConfigName) {
-				await this.setProviderProfile(configuration.currentApiConfigName)
+			if (currentApiConfigName) {
+				await this.setProviderProfile(currentApiConfigName)
 			}
 		}
 
 		const {
-			apiConfiguration,
+			apiConfiguration: stateApiConfiguration,
 			organizationAllowList,
 			diffEnabled: enableDiff,
 			enableCheckpoints,
@@ -3232,6 +3676,12 @@ export class ClineProvider
 			cloudUserInfo,
 			remoteControlEnabled,
 		} = await this.getState()
+
+		// kilocode_change start: seed a new task from global/window defaults exactly once, then detach.
+		const runtimeProfile = this.getRuntimeProviderProfile()
+		const apiConfiguration = { ...stateApiConfiguration }
+		this.setRuntimeMode(runtimeProfile.currentMode ?? defaultModeSlug)
+		// kilocode_change end
 
 		// Single-open-task invariant: always enforce for user-initiated top-level tasks
 		if (!parentTask) {
@@ -3277,6 +3727,8 @@ export class ClineProvider
 	}
 
 	public async cancelTask(): Promise<void> {
+		this.ensureWorkspaceRestoreAcknowledged()
+
 		const task = this.getCurrentTask()
 
 		if (!task) {
@@ -3382,7 +3834,7 @@ export class ClineProvider
 	}
 
 	public async setMode(mode: string): Promise<void> {
-		await this.setValues({ mode })
+		await this.handleModeSwitch(mode as Mode)
 	}
 
 	// kilocode_change start: Review mode
@@ -3458,8 +3910,7 @@ export class ClineProvider
 	}
 
 	public async getProviderProfile(): Promise<string> {
-		const { currentApiConfigName = "default" } = await this.getState()
-		return currentApiConfigName
+		return this.getRuntimeProviderProfile().currentApiConfigName
 	}
 
 	public async setProviderProfile(name: string): Promise<void> {
@@ -4047,6 +4498,7 @@ Here is the project's README to help you get started:\n\n${mcpDetails.readmeCont
 			parentClineMessages = await readTaskMessages({
 				taskId: parentTaskId,
 				globalStoragePath,
+				workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
 			})
 		} catch {
 			parentClineMessages = []
@@ -4057,6 +4509,7 @@ Here is the project's README to help you get started:\n\n${mcpDetails.readmeCont
 			parentApiMessages = (await readApiMessages({
 				taskId: parentTaskId,
 				globalStoragePath,
+				workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
 			})) as any[]
 		} catch {
 			parentApiMessages = []
@@ -4076,7 +4529,12 @@ Here is the project's README to help you get started:\n\n${mcpDetails.readmeCont
 			ts,
 		}
 		parentClineMessages.push(subtaskUiMessage)
-		await saveTaskMessages({ messages: parentClineMessages, taskId: parentTaskId, globalStoragePath })
+		await saveTaskMessages({
+			messages: parentClineMessages,
+			taskId: parentTaskId,
+			globalStoragePath,
+			workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
+		})
 
 		// Find the tool_use_id from the last assistant message's new_task tool_use
 		let toolUseId: string | undefined
@@ -4150,7 +4608,12 @@ Here is the project's README to help you get started:\n\n${mcpDetails.readmeCont
 			parentApiMessages[parentApiMessages.length - 1] = validatedMessage
 		}
 
-		await saveApiMessages({ messages: parentApiMessages as any, taskId: parentTaskId, globalStoragePath })
+		await saveApiMessages({
+			messages: parentApiMessages as any,
+			taskId: parentTaskId,
+			globalStoragePath,
+			workspaceRoot: this.cwd, // kilocode_change: project-local dialog session storage
+		})
 
 		// 3) Update child metadata to "completed" status
 		try {

@@ -122,7 +122,7 @@ vi.mock("openai", () => {
 import OpenAI from "openai"
 import type { Anthropic } from "@anthropic-ai/sdk"
 
-import { deepSeekDefaultModelId, type ModelInfo } from "@roo-code/types"
+import { deepSeekDefaultModelId, deepSeekModels, type ModelInfo } from "@roo-code/types"
 
 import type { ApiHandlerOptions } from "../../../shared/api"
 
@@ -255,10 +255,10 @@ describe("DeepSeekHandler", () => {
 			const model = handlerWithInvalidModel.getModel()
 			expect(model.id).toBe("invalid-model") // Returns provided ID
 			expect(model.info).toBeDefined()
-			// With the current implementation, it's the same object reference when using default model info
-			expect(model.info).toBe(handler.getModel().info)
+			// Falls back to the default model info (deepseek-v4-pro)
+			expect(model.info).toBe(deepSeekModels[deepSeekDefaultModelId])
 			// Should have the same base properties
-			expect(model.info.contextWindow).toBe(handler.getModel().info.contextWindow)
+			expect(model.info.contextWindow).toBe(deepSeekModels[deepSeekDefaultModelId].contextWindow)
 			// And should have supportsPromptCache set to true
 			expect(model.info.supportsPromptCache).toBe(true)
 		})
@@ -294,6 +294,19 @@ describe("DeepSeekHandler", () => {
 				],
 			},
 		]
+
+		const consumeStream = async (stream: AsyncIterable<unknown>) => {
+			for await (const _chunk of stream) {
+				// Consume the stream to trigger the mocked API request.
+			}
+		}
+
+		const createV4ProHandler = (options: Partial<ApiHandlerOptions> = {}) =>
+			new DeepSeekHandler({
+				...mockOptions,
+				apiModelId: "deepseek-v4-pro",
+				...options,
+			})
 
 		it("should handle streaming responses", async () => {
 			const stream = handler.createMessage(systemPrompt, messages)
@@ -332,6 +345,115 @@ describe("DeepSeekHandler", () => {
 			expect(usageChunks.length).toBeGreaterThan(0)
 			expect(usageChunks[0].cacheWriteTokens).toBe(8)
 			expect(usageChunks[0].cacheReadTokens).toBe(2)
+		})
+
+		describe("DeepSeek V4 request options", () => {
+			it("should send max_tokens and omit max_completion_tokens for deepseek-v4-pro", async () => {
+				const v4Handler = createV4ProHandler()
+
+				await consumeStream(v4Handler.createMessage(systemPrompt, messages))
+
+				const callArgs = mockCreate.mock.calls[0][0]
+				expect(callArgs.max_tokens).toBe(200_000)
+				expect(callArgs.max_completion_tokens).toBeUndefined()
+			})
+
+			it("should enable thinking and send high reasoning effort for deepseek-v4-pro by default", async () => {
+				const v4Handler = createV4ProHandler()
+
+				await consumeStream(v4Handler.createMessage(systemPrompt, messages))
+
+				const callArgs = mockCreate.mock.calls[0][0]
+				expect(callArgs.thinking).toEqual({ type: "enabled" })
+				expect(callArgs.reasoning_effort).toBe("high")
+			})
+
+			it("should disable thinking when enableReasoningEffort is false for deepseek-v4-pro", async () => {
+				const v4Handler = createV4ProHandler({ enableReasoningEffort: false })
+
+				await consumeStream(v4Handler.createMessage(systemPrompt, messages))
+
+				const callArgs = mockCreate.mock.calls[0][0]
+				expect(callArgs.thinking).toEqual({ type: "disabled" })
+				expect(callArgs.reasoning_effort).toBeUndefined()
+			})
+
+			it.each([
+				["xhigh", "max"],
+				["medium", "high"],
+				["low", "low"],
+			] as const)("should map reasoning effort %s to DeepSeek %s", async (reasoningEffort, expectedEffort) => {
+				mockCreate.mockClear()
+				const v4Handler = createV4ProHandler({ reasoningEffort })
+
+				await consumeStream(v4Handler.createMessage(systemPrompt, messages))
+
+				const callArgs = mockCreate.mock.calls[0][0]
+				expect(callArgs.thinking).toEqual({ type: "enabled" })
+				expect(callArgs.reasoning_effort).toBe(expectedEffort)
+			})
+
+			it("should send the system prompt as a system message for deepseek-v4-pro", async () => {
+				const v4Handler = createV4ProHandler()
+
+				await consumeStream(v4Handler.createMessage(systemPrompt, messages))
+
+				const callArgs = mockCreate.mock.calls[0][0]
+				expect(callArgs.messages[0]).toEqual({ role: "system", content: systemPrompt })
+				expect(
+					callArgs.messages.some(
+						(message: any) => message.role === "user" && message.content === systemPrompt,
+					),
+				).toBe(false)
+			})
+
+			it("should merge text following tool_result into the tool message for deepseek-v4-pro", async () => {
+				const v4Handler = createV4ProHandler()
+				const toolMessages: Anthropic.Messages.MessageParam[] = [
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "tool_use",
+								id: "toolu_123",
+								name: "get_weather",
+								input: { location: "SF" },
+							},
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "toolu_123",
+								content: "Weather is sunny.",
+							},
+							{
+								type: "text",
+								text: "<environment_details>Updated context</environment_details>",
+							},
+						],
+					},
+				]
+
+				await consumeStream(v4Handler.createMessage(systemPrompt, toolMessages))
+
+				const callArgs = mockCreate.mock.calls[0][0]
+				const toolMessage = callArgs.messages.find((message: any) => message.role === "tool")
+				expect(toolMessage).toEqual({
+					role: "tool",
+					tool_call_id: "toolu_123",
+					content: "Weather is sunny.\n\n<environment_details>Updated context</environment_details>",
+				})
+				expect(
+					callArgs.messages.some(
+						(message: any) =>
+							message.role === "user" &&
+							message.content === "<environment_details>Updated context</environment_details>",
+					),
+				).toBe(false)
+			})
 		})
 	})
 
@@ -424,7 +546,7 @@ describe("DeepSeekHandler", () => {
 			expect(reasoningChunks[1].text).toBe(" I'll analyze step by step.")
 		})
 
-		it("should pass thinking parameter for deepseek-reasoner model", async () => {
+		it("should NOT pass thinking parameter for legacy deepseek-reasoner model", async () => {
 			const reasonerHandler = new DeepSeekHandler({
 				...mockOptions,
 				apiModelId: "deepseek-reasoner",
@@ -435,14 +557,9 @@ describe("DeepSeekHandler", () => {
 				// Consume the stream
 			}
 
-			// Verify that the thinking parameter was passed to the API
-			// Note: mockCreate receives two arguments - request options and path options
-			expect(mockCreate).toHaveBeenCalledWith(
-				expect.objectContaining({
-					thinking: { type: "enabled" },
-				}),
-				{}, // Empty path options for non-Azure URLs
-			)
+			// Legacy reasoner auto-enables thinking by model id, so no explicit thinking param is sent.
+			const callArgs = mockCreate.mock.calls[0][0]
+			expect(callArgs.thinking).toBeUndefined()
 		})
 
 		it("should NOT pass thinking parameter for deepseek-chat model", async () => {

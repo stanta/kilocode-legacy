@@ -56,6 +56,7 @@ describe("checkpointRestoreHandler", () => {
 			contextProxy: {
 				globalStorageUri: { fsPath: "/test/storage" },
 			},
+			cwd: "/test/workspace",
 		}
 
 		// Mock pWaitFor to resolve immediately
@@ -138,6 +139,7 @@ describe("checkpointRestoreHandler", () => {
 
 			// Verify checkpoint restore was called with edit operation
 			expect(mockCline.checkpointRestore).toHaveBeenCalledWith({
+				taskId: "test-task-123",
 				ts: 3,
 				commitHash: "abc123",
 				mode: "restore",
@@ -165,6 +167,7 @@ describe("checkpointRestoreHandler", () => {
 				messages: mockCline.clineMessages,
 				taskId: "test-task-123",
 				globalStoragePath: "/test/storage",
+				workspaceRoot: "/test/workspace",
 			})
 
 			// Verify createTaskWithHistoryItem was called

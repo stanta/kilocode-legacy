@@ -9,6 +9,7 @@ import { GitCommitVertical } from "lucide-react"
 type CheckpointSavedProps = {
 	ts: number
 	commitHash: string
+	taskId?: string
 	currentHash?: string
 	checkpoint?: Record<string, unknown>
 }
@@ -108,6 +109,7 @@ export const CheckpointSaved = ({ checkpoint, currentHash, ...props }: Checkpoin
 				<CheckpointMenu
 					ts={props.ts}
 					commitHash={props.commitHash}
+					taskId={props.taskId}
 					checkpoint={metadata}
 					onOpenChange={handlePopoverOpenChange}
 				/>

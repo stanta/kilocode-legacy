@@ -306,6 +306,7 @@ export const editMessageHandler = async (provider: ClineProvider, message: Webvi
 
 				try {
 					await currentCline.checkpointRestore({
+						taskId: currentCline.taskId,
 						commitHash: checkpointMessage.text,
 						ts: checkpointMessage.ts,
 						mode: "preview",

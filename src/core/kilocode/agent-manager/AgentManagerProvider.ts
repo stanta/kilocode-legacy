@@ -734,7 +734,7 @@ export class AgentManagerProvider implements vscode.Disposable {
 	}
 
 	private async getApiConfigurationForCli(): Promise<ProviderSettings | undefined> {
-		const { apiConfiguration } = await this.provider.getState()
+		const apiConfiguration = await this.provider.getEffectiveApiConfiguration()
 		// Log API configuration details for debugging
 		const hasKilocodeToken = !!apiConfiguration?.kilocodeToken
 		const apiProvider = apiConfiguration?.apiProvider || "none"
@@ -793,7 +793,13 @@ export class AgentManagerProvider implements vscode.Disposable {
 			sessionData?: {
 				uiMessages: ClineMessage[]
 				apiConversationHistory: unknown[]
-				metadata: { sessionId: string; title: string; createdAt: string; mode: string | null }
+				metadata: {
+					sessionId: string
+					title: string
+					createdAt: string
+					mode: string | null
+					model: string | null // kilocode_change
+				}
 			} // For resuming with history
 		},
 		onSetupFailed?: () => void,
@@ -1433,7 +1439,13 @@ export class AgentManagerProvider implements vscode.Disposable {
 			| {
 					uiMessages: ClineMessage[]
 					apiConversationHistory: unknown[]
-					metadata: { sessionId: string; title: string; createdAt: string; mode: string | null }
+					metadata: {
+						sessionId: string
+						title: string
+						createdAt: string
+						mode: string | null
+						model: string | null // kilocode_change
+					}
 			  }
 			| undefined
 		try {
@@ -1458,6 +1470,17 @@ export class AgentManagerProvider implements vscode.Disposable {
 			this.outputChannel.appendLine(`[AgentManager] Resuming with mode: ${resumeMode}`)
 		}
 
+		// kilocode_change start - cloud metadata is authoritative for remote and synced sessions
+		const resumeModel = sessionData?.metadata.model ?? session?.model
+		if (resumeModel) {
+			this.outputChannel.appendLine(`[AgentManager] Resuming with model: ${resumeModel}`)
+		} else if (sessionData) {
+			this.outputChannel.appendLine(
+				`[AgentManager] Resuming legacy remote session ${sessionId} without last_model metadata`,
+			)
+		}
+		// kilocode_change end
+
 		// Handle local session with parallel mode
 		if (session?.parallelMode?.enabled && session.parallelMode.branch) {
 			const worktreeInfo = await this.prepareWorktreeForResume(session)
@@ -1470,7 +1493,7 @@ export class AgentManagerProvider implements vscode.Disposable {
 					effectiveWorkspace: worktreeInfo.path,
 					images,
 					sessionData,
-					model: session.model,
+					model: resumeModel,
 					mode: resumeMode ?? undefined,
 				})
 				return
@@ -1487,7 +1510,7 @@ export class AgentManagerProvider implements vscode.Disposable {
 			gitUrl: session?.gitUrl,
 			images,
 			sessionData,
-			model: session?.model,
+			model: resumeModel,
 			mode: resumeMode ?? undefined,
 		})
 	}
@@ -1664,9 +1687,8 @@ export class AgentManagerProvider implements vscode.Disposable {
 		this.fetchingModels = true
 
 		try {
-			// Get API configuration from the extension
-			const state = await this.provider.getState()
-			const { apiConfiguration } = state
+			// Get API configuration from the current session/window runtime.
+			const apiConfiguration = await this.provider.getEffectiveApiConfiguration()
 
 			// Determine the provider - default to "kilocode" if not set
 			const providerName = apiConfiguration.apiProvider || "kilocode"

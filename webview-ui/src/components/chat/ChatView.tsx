@@ -28,7 +28,7 @@ import { useExtensionState } from "@src/context/ExtensionStateContext"
 import { useSelectedModel } from "@src/components/ui/hooks/useSelectedModel"
 // import RooHero from "@src/components/welcome/RooHero" // kilocode_change: unused
 // import RooTips from "@src/components/welcome/RooTips" // kilocode_change: unused
-import { StandardTooltip } from "@src/components/ui"
+import { Button as UiButton, StandardTooltip } from "@src/components/ui"
 
 // import VersionIndicator from "../common/VersionIndicator" // kilocode_change: unused
 import { OrganizationSelector } from "../kilocode/common/OrganizationSelector"
@@ -131,6 +131,7 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 		messageQueue = [],
 		sendMessageOnEnter, // kilocode_change
 		isBrowserSessionActive,
+		staleWorkspaceRestore,
 	} = useExtensionState()
 
 	const messagesRef = useRef(messages)
@@ -684,6 +685,12 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 		// setSecondaryButtonText(undefined)
 	}, [])
 
+	const hasUnacknowledgedWorkspaceRestore = staleWorkspaceRestore?.acknowledged === false
+
+	const acknowledgeWorkspaceRestore = useCallback(() => {
+		vscode.postMessage({ type: "askResponse", askResponse: "workspace_restore_acknowledged" })
+	}, [])
+
 	/**
 	 * Handles sending messages to the extension
 	 * @param text - The message text to send
@@ -691,6 +698,10 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 	 */
 	const handleSendMessage = useCallback(
 		(text: string, images: string[]) => {
+			if (hasUnacknowledgedWorkspaceRestore) {
+				return
+			}
+
 			text = text.trim()
 
 			if (text || images.length > 0) {
@@ -754,7 +765,14 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 				handleChatReset()
 			}
 		},
-		[handleChatReset, markFollowUpAsAnswered, sendingDisabled, isStreaming, messageQueue.length], // messagesRef and clineAskRef are stable
+		[
+			handleChatReset,
+			markFollowUpAsAnswered,
+			sendingDisabled,
+			isStreaming,
+			messageQueue.length,
+			hasUnacknowledgedWorkspaceRestore,
+		], // messagesRef and clineAskRef are stable
 	)
 
 	const handleSetChatBoxMessage = useCallback(
@@ -779,6 +797,10 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 	// extension.
 	const handlePrimaryButtonClick = useCallback(
 		(text?: string, images?: string[]) => {
+			if (hasUnacknowledgedWorkspaceRestore) {
+				return
+			}
+
 			// Mark that user has responded
 			userRespondedRef.current = true
 
@@ -858,11 +880,15 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 			setPrimaryButtonText(undefined)
 			setSecondaryButtonText(undefined)
 		},
-		[clineAsk, startNewTask, currentTaskItem?.parentTaskId, lastMessage?.text], // kilocode_change: add lastMessage?.text
+		[clineAsk, startNewTask, currentTaskItem?.parentTaskId, lastMessage?.text, hasUnacknowledgedWorkspaceRestore], // kilocode_change: add lastMessage?.text
 	)
 
 	const handleSecondaryButtonClick = useCallback(
 		(text?: string, images?: string[]) => {
+			if (hasUnacknowledgedWorkspaceRestore) {
+				return
+			}
+
 			// Mark that user has responded
 			userRespondedRef.current = true
 
@@ -908,10 +934,15 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 			setClineAsk(undefined)
 			setEnableButtons(false)
 		},
-		[clineAsk, startNewTask, isStreaming],
+		[clineAsk, startNewTask, isStreaming, hasUnacknowledgedWorkspaceRestore],
 	)
 
-	const handleTaskCloseButtonClick = useCallback(() => startNewTask(), [startNewTask]) // kilocode_change
+	const handleTaskCloseButtonClick = useCallback(() => {
+		if (hasUnacknowledgedWorkspaceRestore) {
+			return
+		}
+		startNewTask()
+	}, [startNewTask, hasUnacknowledgedWorkspaceRestore]) // kilocode_change
 
 	const { info: model } = useSelectedModel(apiConfiguration)
 
@@ -1576,6 +1607,10 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 
 	useImperativeHandle(ref, () => ({
 		acceptInput: () => {
+			if (hasUnacknowledgedWorkspaceRestore) {
+				return
+			}
+
 			if (enableButtons && primaryButtonText) {
 				handlePrimaryButtonClick(inputValue, selectedImages)
 			} else if (!sendingDisabled && !isProfileDisabled && (inputValue.trim() || selectedImages.length > 0)) {
@@ -1686,6 +1721,24 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 					{checkpointWarning && (
 						<div className="px-3">
 							<CheckpointWarning warning={checkpointWarning} />
+						</div>
+					)}
+
+					{hasUnacknowledgedWorkspaceRestore && (
+						<div
+							className="mx-3 mt-2 border border-vscode-inputValidation-warningBorder bg-vscode-inputValidation-warningBackground text-vscode-inputValidation-warningForeground px-3 py-2 text-sm"
+							data-testid="workspace-restore-stale-banner">
+							<div className="font-medium">{t("chat:checkpoint.workspaceRestoreStale.title")}</div>
+							<div className="mt-1">{t("chat:checkpoint.workspaceRestoreStale.description")}</div>
+							<div className="mt-2">
+								<UiButton
+									variant="secondary"
+									size="sm"
+									onClick={acknowledgeWorkspaceRestore}
+									data-testid="workspace-restore-acknowledge-btn">
+									{t("chat:checkpoint.workspaceRestoreStale.acknowledge")}
+								</UiButton>
+							</div>
 						</div>
 					)}
 				</>
@@ -1857,7 +1910,7 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 																				: undefined
 											}>
 											<Button
-												disabled={!enableButtons}
+												disabled={!enableButtons || hasUnacknowledgedWorkspaceRestore}
 												className={secondaryButtonText ? "flex-1 mr-[6px]" : "flex-[2] mr-0"}
 												onClick={() => handlePrimaryButtonClick(inputValue, selectedImages)}>
 												{primaryButtonText}
@@ -1881,7 +1934,10 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 																	: undefined
 											}>
 											<Button
-												disabled={!enableButtons && !(isStreaming && !didClickCancel)}
+												disabled={
+													hasUnacknowledgedWorkspaceRestore ||
+													(!enableButtons && !(isStreaming && !didClickCancel))
+												}
 												className={isStreaming ? "flex-[2] ml-0" : "flex-1 ml-[6px]"}
 												onClick={() => handleSecondaryButtonClick(inputValue, selectedImages)}>
 												{isStreaming ? t("chat:cancel.title") : secondaryButtonText}
@@ -1916,7 +1972,7 @@ const ChatViewComponent: React.ForwardRefRenderFunction<ChatViewRef, ChatViewPro
 				ref={textAreaRef}
 				inputValue={inputValue}
 				setInputValue={setInputValue}
-				sendingDisabled={sendingDisabled || isProfileDisabled}
+				sendingDisabled={sendingDisabled || isProfileDisabled || hasUnacknowledgedWorkspaceRestore}
 				selectApiConfigDisabled={sendingDisabled && clineAsk !== "api_req_failed"}
 				placeholderText={placeholderText}
 				selectedImages={selectedImages}

@@ -435,6 +435,7 @@ export class EditFileTool extends BaseTool<"edit_file"> {
 			}
 
 			const didApprove = await askApproval("tool", completeMessage, undefined, isWriteProtected)
+			const apiConfiguration = provider ? await provider.getEffectiveApiConfiguration(task.taskId) : undefined
 
 			// kilocode_change start
 			// Track contribution (fire-and-forget)
@@ -445,8 +446,8 @@ export class EditFileTool extends BaseTool<"edit_file"> {
 				newContent: newContent,
 				status: didApprove ? "accepted" : "rejected",
 				taskId: task.taskId,
-				organizationId: state?.apiConfiguration?.kilocodeOrganizationId,
-				kilocodeToken: state?.apiConfiguration?.kilocodeToken || "",
+				organizationId: apiConfiguration?.kilocodeOrganizationId,
+				kilocodeToken: apiConfiguration?.kilocodeToken || "",
 			})
 			// kilocode_change end
 

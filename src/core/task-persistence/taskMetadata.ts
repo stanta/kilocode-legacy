@@ -1,7 +1,7 @@
 import NodeCache from "node-cache"
 import getFolderSize from "get-folder-size"
 
-import type { ClineMessage, HistoryItem, ToolProtocol } from "@roo-code/types"
+import type { ClineMessage, HistoryItem, SessionRuntimeConfig, ToolProtocol } from "@roo-code/types"
 
 import { combineApiRequests } from "../../shared/combineApiRequests"
 import { combineCommandSequences } from "../../shared/combineCommandSequences"
@@ -19,6 +19,7 @@ export type TaskMetadataOptions = {
 	taskNumber: number
 	messages: ClineMessage[]
 	globalStoragePath: string
+	workspaceRoot?: string
 	workspace: string
 	mode?: string
 	/** Provider profile name for the task (sticky profile feature) */
@@ -30,6 +31,7 @@ export type TaskMetadataOptions = {
 	 * continue using this protocol even if user settings change.
 	 */
 	toolProtocol?: ToolProtocol
+	sessionRuntimeConfig?: SessionRuntimeConfig // kilocode_change: session-local mode/profile/model bindings
 	// kilocode_change start
 	/**
 	 * cumulative total cost including deleted messages.
@@ -46,14 +48,18 @@ export async function taskMetadata({
 	taskNumber,
 	messages,
 	globalStoragePath,
+	workspaceRoot,
 	workspace,
 	mode,
 	apiConfigName,
 	initialStatus,
 	toolProtocol,
+	sessionRuntimeConfig,
 	cumulativeTotalCost, // kilocode_change
 }: TaskMetadataOptions) {
-	const taskDir = await getTaskDirectoryPath(globalStoragePath, id)
+	// kilocode_change start: project-local dialog session storage
+	const taskDir = await getTaskDirectoryPath(globalStoragePath, id, { workspaceRoot })
+	// kilocode_change end
 
 	// Determine message availability upfront
 	const hasMessages = messages && messages.length > 0
@@ -128,6 +134,7 @@ export async function taskMetadata({
 		mode,
 		...(toolProtocol && { toolProtocol }),
 		...(typeof apiConfigName === "string" && apiConfigName.length > 0 ? { apiConfigName } : {}),
+		...(sessionRuntimeConfig && { sessionRuntimeConfig }), // kilocode_change
 		...(initialStatus && { status: initialStatus }),
 	}
 

@@ -582,7 +582,153 @@ describe("AgentManagerProvider CLI spawning", () => {
 
 			expect((provider as any).getRunningSessionCount()).toBe(2)
 		})
+
+		// kilocode_change start - preserve and prioritize per-session resume models
+		describe("resume model precedence", () => {
+			it("uses the local session model instead of the current sidebar model", async () => {
+				const registry = (provider as any).registry
+				registry.createSession("local-session", "prompt", undefined, { model: "model-A" })
+				registry.updateSessionStatus("local-session", "done")
+				;(provider as any).remoteSessionService.fetchSessionDataForResume = vi.fn().mockResolvedValue(null)
+				const spawn = vi
+					.spyOn((provider as any).processHandler, "spawnProcess")
+					.mockImplementation(() => undefined)
+
+				await provider.resumeSession("local-session", "continue")
+
+				expect(spawn).toHaveBeenCalledWith(
+					expect.any(String),
+					"/tmp/workspace",
+					"continue",
+					expect.objectContaining({ model: "model-A" }),
+					expect.any(Function),
+				)
+			})
+
+			it("uses remote last_model for a remote-only session", async () => {
+				;(provider as any).remoteSessionService.fetchSessionDataForResume = vi.fn().mockResolvedValue({
+					uiMessages: [],
+					apiConversationHistory: [],
+					metadata: {
+						sessionId: "remote-session",
+						title: "Remote",
+						createdAt: "2026-01-01T00:00:00.000Z",
+						mode: "code",
+						model: "remote-model",
+					},
+				})
+				const spawn = vi
+					.spyOn((provider as any).processHandler, "spawnProcess")
+					.mockImplementation(() => undefined)
+
+				await provider.resumeSession("remote-session", "continue")
+
+				expect((provider as any).registry.getSession("remote-session")).toBeUndefined()
+				expect(spawn).toHaveBeenCalledWith(
+					expect.any(String),
+					"/tmp/workspace",
+					"continue",
+					expect.objectContaining({ model: "remote-model" }),
+					expect.any(Function),
+				)
+			})
+
+			it("prioritizes remote metadata model A over local registry model B", async () => {
+				const registry = (provider as any).registry
+				registry.createSession("synced-session", "prompt", undefined, { model: "local-model-B" })
+				registry.updateSessionStatus("synced-session", "done")
+				;(provider as any).remoteSessionService.fetchSessionDataForResume = vi.fn().mockResolvedValue({
+					uiMessages: [],
+					apiConversationHistory: [],
+					metadata: {
+						sessionId: "synced-session",
+						title: "Synced",
+						createdAt: "2026-01-01T00:00:00.000Z",
+						mode: "code",
+						model: "remote-model-A",
+					},
+				})
+				const spawn = vi
+					.spyOn((provider as any).processHandler, "spawnProcess")
+					.mockImplementation(() => undefined)
+
+				await provider.resumeSession("synced-session", "continue")
+
+				expect(spawn).toHaveBeenCalledWith(
+					expect.any(String),
+					"/tmp/workspace",
+					"continue",
+					expect.objectContaining({ model: "remote-model-A" }),
+					expect.any(Function),
+				)
+			})
+
+			it("serializes and resolves remote metadata model A instead of local/sidebar model B", async () => {
+				const registry = (provider as any).registry
+				registry.createSession("composed-resume", "prompt", undefined, { model: "local-model-B" })
+				registry.updateSessionStatus("composed-resume", "done")
+				;(provider as any).provider.getEffectiveApiConfiguration = vi.fn().mockResolvedValue({
+					apiProvider: "kilocode",
+					kilocodeModel: "sidebar-model-B",
+				})
+				;(provider as any).remoteSessionService.fetchSessionDataForResume = vi.fn().mockResolvedValue({
+					uiMessages: [],
+					apiConversationHistory: [],
+					metadata: {
+						sessionId: "composed-resume",
+						title: "Composed",
+						createdAt: "2026-01-01T00:00:00.000Z",
+						mode: "code",
+						model: "remote-model-A",
+					},
+				})
+
+				await provider.resumeSession("composed-resume", "continue")
+
+				const forkMock = (await import("node:child_process")).fork as unknown as Mock
+				const agentConfig = JSON.parse(forkMock.mock.calls[0][2].env.AGENT_CONFIG)
+				expect(agentConfig.providerSettings).toMatchObject({
+					apiProvider: "kilocode",
+					kilocodeModel: "remote-model-A",
+				})
+				expect(agentConfig.providerSettings.apiModelId).toBeUndefined()
+				const { buildApiHandler } = await import("../../../../api")
+				expect(buildApiHandler(agentConfig.providerSettings).getModel().id).toBe("remote-model-A")
+				expect((provider as any).processHandler.pendingProcess.model).toBe("remote-model-A")
+			})
+
+			it("keeps legacy remote resumes unmodified when last_model is unavailable", async () => {
+				;(provider as any).remoteSessionService.fetchSessionDataForResume = vi.fn().mockResolvedValue({
+					uiMessages: [],
+					apiConversationHistory: [],
+					metadata: {
+						sessionId: "legacy-session",
+						title: "Legacy",
+						createdAt: "2026-01-01T00:00:00.000Z",
+						mode: null,
+						model: null,
+					},
+				})
+				const spawn = vi
+					.spyOn((provider as any).processHandler, "spawnProcess")
+					.mockImplementation(() => undefined)
+
+				await provider.resumeSession("legacy-session", "continue")
+
+				expect(spawn).toHaveBeenCalledWith(
+					expect.any(String),
+					"/tmp/workspace",
+					"continue",
+					expect.objectContaining({ model: undefined }),
+					expect.any(Function),
+				)
+				expect(mockOutputChannel.appendLine).toHaveBeenCalledWith(
+					expect.stringContaining("without last_model metadata"),
+				)
+			})
+		})
 	})
+	// kilocode_change end
 })
 
 describe("AgentManagerProvider gitUrl filtering", () => {

@@ -183,7 +183,9 @@ export async function editFileTool(
 		// kilocode_change start
 		// Track contribution (fire-and-forget, never blocks user workflow)
 		const provider = cline.providerRef.deref()
-		const state = await provider?.getState()
+		const apiConfiguration = provider
+			? await provider.getEffectiveApiConfiguration(cline.taskId)
+			: cline.apiConfiguration
 		trackContribution({
 			cwd: cline.cwd,
 			filePath: relPath,
@@ -191,8 +193,8 @@ export async function editFileTool(
 			newContent,
 			status: approved ? "accepted" : "rejected",
 			taskId: cline.taskId,
-			organizationId: state?.apiConfiguration?.kilocodeOrganizationId,
-			kilocodeToken: state?.apiConfiguration?.kilocodeToken || "",
+			organizationId: apiConfiguration?.kilocodeOrganizationId,
+			kilocodeToken: apiConfiguration?.kilocodeToken || "",
 		})
 		// kilocode_change end
 
@@ -249,9 +251,10 @@ async function applyFastApplyEdit(
 		}
 
 		const state = await provider.getState()
+		const apiConfiguration = await provider.getEffectiveApiConfiguration(cline.taskId)
 
 		// Check if user has Fast Apply enabled via OpenRouter or direct API
-		const morphConfig = await getFastApplyConfiguration(state)
+		const morphConfig = await getFastApplyConfiguration({ ...state, apiConfiguration })
 		if (!morphConfig.available) {
 			return { success: false, error: morphConfig.error || "Fast Apply is not available" }
 		}
@@ -273,7 +276,7 @@ async function applyFastApplyEdit(
 			`Original Content: ${originalContent.length} characters`,
 		].join("\n")
 
-		const kiloTesterSuppressUntil = state.apiConfiguration.kilocodeTesterWarningsDisabledUntil
+		const kiloTesterSuppressUntil = apiConfiguration.kilocodeTesterWarningsDisabledUntil
 		const kiloTesterSuppress =
 			kiloTesterSuppressUntil && kiloTesterSuppressUntil > Date.now() ? { [X_KILOCODE_TESTER]: "SUPPRESS" } : {}
 		// Create OpenAI client for Morph API

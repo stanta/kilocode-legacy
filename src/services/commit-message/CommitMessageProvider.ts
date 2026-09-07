@@ -1,6 +1,8 @@
 // kilocode_change - new file
 import * as vscode from "vscode"
+import { ContextProxy } from "../../core/config/ContextProxy"
 import { ProviderSettingsManager } from "../../core/config/ProviderSettingsManager"
+import { ClineProvider } from "../../core/webview/ClineProvider"
 import { t } from "../../i18n"
 
 import { CommitMessageRequest, CommitMessageResult } from "./types/core"
@@ -25,7 +27,12 @@ export class CommitMessageProvider implements vscode.Disposable {
 	) {
 		const providerSettingsManager = new ProviderSettingsManager(this.context)
 
-		this.generator = new CommitMessageGenerator(providerSettingsManager)
+		this.generator = new CommitMessageGenerator(providerSettingsManager, async () => {
+			const provider = await ClineProvider.getInstance()
+			return provider
+				? await provider.getEffectiveApiConfiguration()
+				: ContextProxy.instance.getProviderSettings()
+		})
 		this.vscodeAdapter = new VSCodeCommitMessageAdapter(this.generator)
 		this.jetbrainsAdapter = new JetBrainsCommitMessageAdapter(this.generator)
 	}

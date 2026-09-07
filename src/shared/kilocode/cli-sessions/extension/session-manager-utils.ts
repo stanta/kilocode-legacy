@@ -40,7 +40,7 @@ export function kilo_initializeSessionManager({
 				return
 			}
 
-			const pathProvider = new ExtensionPathProvider(context)
+			const pathProvider = new ExtensionPathProvider(context, { workspaceRoot: provider.cwd })
 			const logger = new ExtensionLoggerAdapter(outputChannel)
 			const extensionMessenger = new ExtensionMessengerImpl(provider)
 
@@ -71,9 +71,9 @@ export function kilo_initializeSessionManager({
 								return currentTask.apiConfiguration.kilocodeOrganizationId
 							}
 
-							const state = await provider.getState()
+							const apiConfiguration = await provider.getEffectiveApiConfiguration(taskId)
 
-							return state.apiConfiguration.kilocodeOrganizationId
+							return apiConfiguration.kilocodeOrganizationId
 						} catch {
 							return undefined
 						}
@@ -95,7 +95,11 @@ export function kilo_initializeSessionManager({
 							const task = await provider.getTaskWithId(taskId, false)
 							const globalMode = await provider.getMode()
 
-							return task?.historyItem?.mode || globalMode
+							return (
+								task?.historyItem?.sessionRuntimeConfig?.currentMode ||
+								task?.historyItem?.mode ||
+								globalMode
+							)
 						} catch {
 							return undefined
 						}
@@ -114,8 +118,8 @@ export function kilo_initializeSessionManager({
 								return currentTask.api?.getModel().id
 							}
 
-							const state = await provider.getState()
-							const apiHandler = buildApiHandler(state.apiConfiguration)
+							const apiConfiguration = await provider.getEffectiveApiConfiguration(taskId)
+							const apiHandler = buildApiHandler(apiConfiguration)
 
 							return apiHandler.getModel().id
 						} catch {

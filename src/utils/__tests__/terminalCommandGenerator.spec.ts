@@ -4,6 +4,13 @@ import * as vscode from "vscode"
 import { generateTerminalCommand } from "../terminalCommandGenerator"
 import { ContextProxy } from "../../core/config/ContextProxy"
 import { singleCompletionHandler } from "../single-completion-handler"
+import { ClineProvider } from "../../core/webview/ClineProvider"
+
+vi.mock("../../core/webview/ClineProvider", () => ({
+	ClineProvider: {
+		getInstance: vi.fn(),
+	},
+}))
 
 vi.mock("vscode")
 vi.mock("../../core/config/ContextProxy")
@@ -72,6 +79,7 @@ describe("generateTerminalCommand", () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks()
+		vi.mocked(ClineProvider.getInstance).mockResolvedValue(undefined)
 
 		const mockContextProxy = {
 			getProviderSettings: vi.fn().mockReturnValue({
@@ -129,6 +137,26 @@ describe("generateTerminalCommand", () => {
 		expect(mockTerminal.sendText).toHaveBeenCalledWith("ls -la", false)
 		expect(mockTerminal.show).toHaveBeenCalled()
 		expect(vscode.window.showInformationMessage).toHaveBeenCalledWith("Generated command: ls -la")
+	})
+
+	it("should prefer session-effective API configuration when a provider is available", async () => {
+		vi.mocked(mockContext.globalState.get).mockReturnValue(true)
+		vi.mocked(ClineProvider.getInstance).mockResolvedValue({
+			getEffectiveApiConfiguration: vi.fn().mockResolvedValue({
+				apiProvider: "openrouter",
+				apiKey: "session-key",
+			}),
+		} as any)
+
+		await generateTerminalCommand({
+			outputChannel: mockOutputChannel,
+			context: mockContext,
+		})
+
+		expect(singleCompletionHandler).toHaveBeenCalledWith(
+			expect.objectContaining({ apiProvider: "openrouter", apiKey: "session-key" }),
+			expect.any(String),
+		)
 	})
 
 	it("should handle user cancellation", async () => {

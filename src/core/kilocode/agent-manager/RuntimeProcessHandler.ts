@@ -23,8 +23,9 @@ import type {
 	ErrorStreamEvent,
 	CompleteStreamEvent,
 } from "./CliOutputParser"
-import type { ClineMessage, ModeConfig, ProviderSettings } from "@roo-code/types"
+import { getModelId, withModelId, type ClineMessage, type ModeConfig, type ProviderSettings } from "@roo-code/types" // kilocode_change
 import { Package } from "../../../shared/package"
+import { buildApiHandler } from "../../../api" // kilocode_change
 
 /**
  * Timeout for pending sessions (ms) - if "ready" message doesn't arrive within this time,
@@ -62,6 +63,7 @@ interface SessionMetadata {
 	title: string
 	createdAt: string
 	mode: string | null
+	model: string | null // kilocode_change
 }
 
 /**
@@ -230,26 +232,37 @@ export class RuntimeProcessHandler {
 			sessionData?: SessionData // For resuming with history
 			secrets?: Record<string, string> // OAuth credentials for agent process
 		},
-	): Record<string, unknown> {
+	): { config: Record<string, unknown>; effectiveModel?: string } {
 		const modeToUse = options?.mode || "code"
 
 		this.callbacks.onLog(`[buildAgentConfig] mode=${modeToUse}`)
 
+		// kilocode_change start - never pass the shared sidebar settings object to a session process
+		let providerSettings: ProviderSettings = { ...(options?.apiConfiguration ?? {}) }
+		let effectiveModel = getModelId(providerSettings)
+		if (options?.model) {
+			const override = withModelId(providerSettings, options.model)
+			if (!override.ok) {
+				throw new Error(`Unable to apply requested model '${options.model}': ${override.error}`)
+			}
+			providerSettings = override.settings
+			const resolvedModel = buildApiHandler(providerSettings).getModel().id
+			if (resolvedModel !== options.model) {
+				throw new Error(
+					`Requested model mismatch for provider '${providerSettings.apiProvider}': requested '${options.model}', resolved '${resolvedModel}'`,
+				)
+			}
+			effectiveModel = resolvedModel
+		}
+		// kilocode_change end
+
 		const config: Record<string, unknown> = {
 			workspace,
-			providerSettings: options?.apiConfiguration || {},
+			providerSettings,
 			mode: modeToUse, // Use provided mode or default to "code"
 			customModes: options?.customModes, // Pass custom modes to agent process
 			autoApprove: options?.autoApprove ?? true, // Default to auto-approve for agent manager
 			sessionId: options?.sessionId,
-		}
-
-		// Add model override if specified
-		if (options?.model) {
-			// Model is typically set via providerSettings
-			if (config.providerSettings && typeof config.providerSettings === "object") {
-				;(config.providerSettings as Record<string, unknown>).kilocodeModel = options.model
-			}
 		}
 
 		// Add VS Code app root for finding bundled binaries (ripgrep, etc.)
@@ -286,7 +299,7 @@ export class RuntimeProcessHandler {
 			config.secrets = options.secrets
 		}
 
-		return config
+		return { config, effectiveModel }
 	}
 
 	/**
@@ -319,6 +332,19 @@ export class RuntimeProcessHandler {
 			| undefined,
 		onEvent: (sessionId: string, event: StreamEvent) => void,
 	): void {
+		let agentConfig: Record<string, unknown>
+		let effectiveModel: string | undefined
+		try {
+			const preparedConfig = this.buildAgentConfig(workspace, prompt, options)
+			agentConfig = preparedConfig.config
+			effectiveModel = preparedConfig.effectiveModel
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error)
+			this.callbacks.onLog(`[AgentManager] ${message}`)
+			this.callbacks.onStartSessionFailed({ type: "spawn_error", message: `Failed to start agent: ${message}` })
+			return
+		}
+
 		const isResume = !!options?.sessionId
 
 		if (isResume) {
@@ -330,7 +356,7 @@ export class RuntimeProcessHandler {
 					parallelMode: options?.parallelMode,
 					labelOverride: options?.label,
 					gitUrl: options?.gitUrl,
-					model: options?.model,
+					model: effectiveModel,
 					mode: options?.mode,
 				})
 				this.registry.updateSessionStatus(options!.sessionId!, "creating")
@@ -353,9 +379,6 @@ export class RuntimeProcessHandler {
 			})
 			this.callbacks.onPendingSessionChanged(pendingSession)
 		}
-
-		// Build agent configuration
-		const agentConfig = this.buildAgentConfig(workspace, prompt, options)
 
 		// Get process entry point path
 		const entryPath = this.getProcessEntryPath()
@@ -384,7 +407,7 @@ export class RuntimeProcessHandler {
 				desiredLabel: options?.label,
 				worktreeInfo: options?.worktreeInfo,
 				gitUrl: options?.gitUrl,
-				model: options?.model,
+				model: effectiveModel,
 				mode: options?.mode,
 				images: options?.images,
 				sessionData: options?.sessionData,

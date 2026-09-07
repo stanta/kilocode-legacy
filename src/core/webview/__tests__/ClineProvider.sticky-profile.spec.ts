@@ -327,8 +327,8 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 				.spyOn(provider, "updateTaskHistory")
 				.mockImplementation(() => Promise.resolve([]))
 
-			// Mock providerSettingsManager.activateProfile
-			vi.spyOn(provider.providerSettingsManager, "activateProfile").mockResolvedValue({
+			// Mock providerSettingsManager.resolveProfile
+			vi.spyOn(provider.providerSettingsManager, "resolveProfile").mockResolvedValue({
 				name: "new-profile",
 				id: "new-profile-id",
 				apiProvider: "anthropic",
@@ -342,13 +342,9 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 			// Switch provider profile
 			await provider.activateProviderProfile({ name: "new-profile" })
 
-			// Verify task history was updated with new provider profile
-			expect(updateTaskHistorySpy).toHaveBeenCalledWith(
-				expect.objectContaining({
-					id: mockTask.taskId,
-					apiConfigName: "new-profile",
-				}),
-			)
+			// Mock tasks without session APIs update their in-memory profile through the fallback path.
+			expect(updateTaskHistorySpy).not.toHaveBeenCalled()
+			expect(mockTask._taskApiConfigName).toBe("new-profile")
 
 			// Verify task's setTaskApiConfigName was called
 			expect(mockTask.setTaskApiConfigName).toHaveBeenCalledWith("new-profile")
@@ -391,8 +387,8 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 			// Mock updateTaskHistory
 			vi.spyOn(provider, "updateTaskHistory").mockImplementation(() => Promise.resolve([]))
 
-			// Mock providerSettingsManager.activateProfile
-			vi.spyOn(provider.providerSettingsManager, "activateProfile").mockResolvedValue({
+			// Mock providerSettingsManager.resolveProfile
+			vi.spyOn(provider.providerSettingsManager, "resolveProfile").mockResolvedValue({
 				name: "new-profile",
 				id: "new-profile-id",
 				apiProvider: "openrouter",
@@ -436,7 +432,7 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 				.spyOn(provider, "updateTaskHistory")
 				.mockImplementation(() => Promise.resolve([]))
 
-			vi.spyOn(provider.providerSettingsManager, "activateProfile").mockResolvedValue({
+			vi.spyOn(provider.providerSettingsManager, "resolveProfile").mockResolvedValue({
 				name: "new-profile",
 				id: "new-profile-id",
 				apiProvider: "openrouter",
@@ -474,24 +470,25 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 				apiConfigName: "saved-profile", // Saved provider profile
 			}
 
-			// Mock activateProviderProfile to track calls
-			const activateProviderProfileSpy = vi
-				.spyOn(provider, "activateProviderProfile")
-				.mockResolvedValue(undefined)
-
-			// Mock providerSettingsManager.listConfig
+			// Mock global activation and profile metadata/resolution
+			const activateProviderProfileSpy = vi.spyOn(provider, "activateProviderProfile")
+			const activateGlobalProfileSpy = vi.spyOn(provider.providerSettingsManager, "activateProfile")
 			vi.spyOn(provider.providerSettingsManager, "listConfig").mockResolvedValue([
 				{ name: "saved-profile", id: "saved-profile-id", apiProvider: "anthropic" },
 			])
+			vi.spyOn(provider.providerSettingsManager, "resolveProfile").mockResolvedValue({
+				name: "saved-profile",
+				id: "saved-profile-id",
+				apiProvider: "anthropic",
+			} as any)
 
 			// Initialize task with history item
 			await provider.createTaskWithHistoryItem(historyItem)
 
-			// Verify provider profile was restored via activateProviderProfile (restore-only: don't persist mode config)
-			expect(activateProviderProfileSpy).toHaveBeenCalledWith(
-				{ name: "saved-profile" },
-				{ persistModeConfig: false, persistTaskHistory: false },
-			)
+			// Verify provider profile was restored into session/runtime state without global activation
+			expect(activateProviderProfileSpy).not.toHaveBeenCalled()
+			expect(activateGlobalProfileSpy).not.toHaveBeenCalled()
+			expect(provider.getRuntimeProviderProfile().currentApiConfigName).toBe("saved-profile")
 		})
 
 		it("should use current profile if history item has no saved apiConfigName", async () => {
@@ -545,26 +542,24 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 				apiConfigName: "task-specific-profile", // Task's actual profile
 			}
 
-			// Track all activateProviderProfile calls
-			const activateCalls: string[] = []
-			vi.spyOn(provider, "activateProviderProfile").mockImplementation(async (args) => {
-				if ("name" in args) {
-					activateCalls.push(args.name)
-				}
-			})
-
 			// Mock providerSettingsManager methods
 			vi.spyOn(provider.providerSettingsManager, "getModeConfigId").mockResolvedValue("mode-config-id")
 			vi.spyOn(provider.providerSettingsManager, "listConfig").mockResolvedValue([
 				{ name: "mode-preferred-profile", id: "mode-config-id", apiProvider: "anthropic" },
 				{ name: "task-specific-profile", id: "task-profile-id", apiProvider: "openai" },
 			])
+			vi.spyOn(provider.providerSettingsManager, "resolveProfile").mockImplementation(async (args) => {
+				if ("name" in args && args.name === "task-specific-profile") {
+					return { name: "task-specific-profile", id: "task-profile-id", apiProvider: "openai" }
+				}
+				return { name: "mode-preferred-profile", id: "mode-config-id", apiProvider: "anthropic" }
+			})
 
 			// Initialize task with history item
 			await provider.createTaskWithHistoryItem(historyItem)
 
-			// Verify task's apiConfigName was activated LAST (overriding mode-based config)
-			expect(activateCalls[activateCalls.length - 1]).toBe("task-specific-profile")
+			// Verify task's apiConfigName was resolved into session runtime (overriding mode-based config)
+			expect((await provider.getState()).currentApiConfigName).toBe("task-specific-profile")
 		})
 
 		it("should handle missing provider profile gracefully", async () => {
@@ -642,8 +637,8 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 			// Add task to provider stack
 			await provider.addClineToStack(mockTask as any)
 
-			// Mock providerSettingsManager.activateProfile
-			vi.spyOn(provider.providerSettingsManager, "activateProfile").mockResolvedValue({
+			// Mock providerSettingsManager.resolveProfile
+			vi.spyOn(provider.providerSettingsManager, "resolveProfile").mockResolvedValue({
 				name: "new-profile",
 				id: "new-profile-id",
 				apiProvider: "anthropic",
@@ -657,9 +652,9 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 			// Trigger a profile switch
 			await provider.activateProviderProfile({ name: "new-profile" })
 
-			// Verify apiConfigName was included in the updated history item
-			expect(updatedHistoryItem).toBeDefined()
-			expect(updatedHistoryItem.apiConfigName).toBe("new-profile")
+			// Mock tasks without session APIs update only in-memory state in this fallback test.
+			expect(updatedHistoryItem).toBeUndefined()
+			expect(mockTask._taskApiConfigName).toBe("new-profile")
 		})
 	})
 
@@ -742,8 +737,8 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 				return Promise.resolve(taskHistory)
 			})
 
-			// Mock providerSettingsManager.activateProfile
-			vi.spyOn(provider.providerSettingsManager, "activateProfile").mockResolvedValue({
+			// Mock providerSettingsManager.resolveProfile
+			vi.spyOn(provider.providerSettingsManager, "resolveProfile").mockResolvedValue({
 				name: "profile-c",
 				id: "profile-c-id",
 				apiProvider: "anthropic",
@@ -759,9 +754,9 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 			// Switch task 1's profile to profile C
 			await provider.activateProviderProfile({ name: "profile-c" })
 
-			// Verify task 1's profile was updated
+			// Verify task 1's in-memory profile was updated without mutating unrelated session history.
 			expect(task1._taskApiConfigName).toBe("profile-c")
-			expect(taskHistory[0].apiConfigName).toBe("profile-c")
+			expect(taskHistory[0].apiConfigName).toBe("profile-a")
 
 			// Verify task 2's profile remains unchanged
 			expect(taskHistory[1].apiConfigName).toBe("profile-b")
@@ -806,8 +801,8 @@ describe("ClineProvider - Sticky Provider Profile", () => {
 			// Mock updateTaskHistory to throw error
 			vi.spyOn(provider, "updateTaskHistory").mockRejectedValue(new Error("Save failed"))
 
-			// Mock providerSettingsManager.activateProfile
-			vi.spyOn(provider.providerSettingsManager, "activateProfile").mockResolvedValue({
+			// Mock providerSettingsManager.resolveProfile
+			vi.spyOn(provider.providerSettingsManager, "resolveProfile").mockResolvedValue({
 				name: "new-profile",
 				id: "new-profile-id",
 				apiProvider: "anthropic",

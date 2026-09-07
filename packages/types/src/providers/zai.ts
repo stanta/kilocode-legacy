@@ -159,6 +159,25 @@ export const internationalZAiModels = {
 		preferredIndex: 1,
 	},
 	// kilocode_change start
+	"glm-5.3": {
+		maxTokens: 131_072,
+		contextWindow: 1_000_000,
+		supportsImages: false,
+		supportsPromptCache: true,
+		supportsNativeTools: true,
+		defaultToolProtocol: "native",
+		supportsReasoningEffort: ["low", "high", "max"],
+		reasoningEffort: "low",
+		requiredReasoningEffort: true,
+		preserveReasoning: true,
+		inputPrice: 1.4,
+		outputPrice: 4.4,
+		cacheWritesPrice: 0,
+		cacheReadsPrice: 0.26,
+		description:
+			"GLM-5.3 is Z.AI's flagship text model with a 1M-token context window, 128K max output, required reasoning, function calling, and context caching.",
+		preferredIndex: 0,
+	},
 	"glm-5": {
 		maxTokens: 131_072,
 		contextWindow: 200_000,
@@ -175,7 +194,7 @@ export const internationalZAiModels = {
 		cacheReadsPrice: 0.2,
 		description:
 			"GLM-5 is Z.AI's flagship text model with 200K context, 128K max output, thinking mode, function calling, and context caching.",
-		preferredIndex: 0,
+		preferredIndex: 1,
 	},
 	"glm-5-turbo": {
 		maxTokens: 131_072,
@@ -360,6 +379,25 @@ export const mainlandZAiModels = {
 		preferredIndex: 1,
 	},
 	// kilocode_change start
+	"glm-5.3": {
+		maxTokens: 131_072,
+		contextWindow: 1_000_000,
+		supportsImages: false,
+		supportsPromptCache: true,
+		supportsNativeTools: true,
+		defaultToolProtocol: "native",
+		supportsReasoningEffort: ["low", "high", "max"],
+		reasoningEffort: "low",
+		requiredReasoningEffort: true,
+		preserveReasoning: true,
+		inputPrice: 1.1,
+		outputPrice: 3.85,
+		cacheWritesPrice: 0,
+		cacheReadsPrice: 0.28,
+		description:
+			"GLM-5.3 is Z.AI's flagship text model with a 1M-token context window, 128K max output, required reasoning, function calling, and context caching.",
+		preferredIndex: 0,
+	},
 	"glm-5": {
 		maxTokens: 131_072,
 		contextWindow: 200_000,
@@ -376,7 +414,7 @@ export const mainlandZAiModels = {
 		cacheReadsPrice: 0.14,
 		description:
 			"GLM-5 is Z.AI's flagship text model with 200K context, 128K max output, thinking mode, function calling, and context caching.",
-		preferredIndex: 0,
+		preferredIndex: 1,
 	},
 	"glm-5-turbo": {
 		maxTokens: 131_072,

@@ -265,6 +265,30 @@ describe("OpenAiNativeHandler", () => {
 			})
 		})
 
+		it("should return GPT-5.6 Terra model info when selected", () => {
+			const handler = new OpenAiNativeHandler({
+				...mockOptions,
+				apiModelId: "gpt-5.6-terra",
+			})
+
+			const modelInfo = handler.getModel()
+			expect(modelInfo.id).toBe("gpt-5.6-terra")
+			expect(modelInfo.info.maxTokens).toBe(128000)
+			expect(modelInfo.info.contextWindow).toBe(1_050_000)
+			expect(modelInfo.info.supportsVerbosity).toBe(true)
+			expect(modelInfo.info.supportsReasoningEffort).toEqual(["none", "low", "medium", "high", "xhigh"])
+			expect(modelInfo.info.reasoningEffort).toBe("medium")
+			expect(modelInfo.info.inputPrice).toBe(2.0)
+			expect(modelInfo.info.outputPrice).toBe(12.0)
+			expect(modelInfo.info.cacheReadsPrice).toBe(0.2)
+			expect(modelInfo.info.longContextPricing).toEqual({
+				thresholdTokens: 272_000,
+				inputPriceMultiplier: 2,
+				outputPriceMultiplier: 1.5,
+				appliesToServiceTiers: ["default", "flex"],
+			})
+		})
+
 		it("should return GPT-5.3 Chat model info when selected", () => {
 			const chatHandler = new OpenAiNativeHandler({
 				...mockOptions,

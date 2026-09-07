@@ -3,18 +3,26 @@
 import { OpenAiCodexHandler } from "../openai-codex"
 
 describe("OpenAiCodexHandler.getModel", () => {
-	it.each(["gpt-5.5", "gpt-5.1", "gpt-5", "gpt-5.1-codex", "gpt-5-codex", "gpt-5-codex-mini"])(
-		"should return specified model when a valid model id is provided: %s",
-		(apiModelId) => {
-			const handler = new OpenAiCodexHandler({ apiModelId })
-			const model = handler.getModel()
+	it.each([
+		"gpt-6-astra",
+		"gpt-5.6-sol",
+		"gpt-5.6-terra",
+		"gpt-5.6-luna",
+		"gpt-5.5",
+		"gpt-5.1",
+		"gpt-5",
+		"gpt-5.1-codex",
+		"gpt-5-codex",
+		"gpt-5-codex-mini",
+	])("should return specified model when a valid model id is provided: %s", (apiModelId) => {
+		const handler = new OpenAiCodexHandler({ apiModelId })
+		const model = handler.getModel()
 
-			expect(model.id).toBe(apiModelId)
-			expect(model.info).toBeDefined()
-			// Default reasoning effort for GPT-5 family
-			expect(model.info.reasoningEffort).toBe("medium")
-		},
-	)
+		expect(model.id).toBe(apiModelId)
+		expect(model.info).toBeDefined()
+		// Default reasoning effort for GPT-5 family
+		expect(model.info.reasoningEffort).toBe("medium")
+	})
 
 	it("should fall back to default model when an invalid model id is provided", () => {
 		const handler = new OpenAiCodexHandler({ apiModelId: "not-a-real-model" })

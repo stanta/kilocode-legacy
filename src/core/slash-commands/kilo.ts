@@ -10,6 +10,13 @@ import {
 	condenseToolResponse,
 } from "../prompts/commands"
 
+export interface KiloSlashCommandResult {
+	processedText: string
+	needsRulesFileCheck: boolean
+	exportAllSessionsRequested?: boolean
+	exportAllDialogsRequested?: boolean
+}
+
 function enabledWorkflowToggles(workflowToggles: ClineRulesToggles) {
 	return Object.entries(workflowToggles)
 		.filter(([_, enabled]) => enabled)
@@ -27,7 +34,7 @@ export async function parseKiloSlashCommands(
 	text: string,
 	localWorkflowToggles: ClineRulesToggles,
 	globalWorkflowToggles: ClineRulesToggles,
-): Promise<{ processedText: string; needsRulesFileCheck: boolean }> {
+): Promise<KiloSlashCommandResult> {
 	const condenseAliases = condenseToolResponse
 
 	const commandReplacements: Record<string, ((userInput: string) => string) | undefined> = {
@@ -49,6 +56,24 @@ export async function parseKiloSlashCommands(
 		const commandName = match[3]
 		const [slashCommandStartIndex, slashCommandEndIndex] = match.indices[2]
 		const textWithoutSlashCommand = text.slice(0, slashCommandStartIndex) + text.slice(slashCommandEndIndex)
+
+		// kilocode_change start
+		if (commandName === "export_all_sessions") {
+			return {
+				processedText: textWithoutSlashCommand,
+				needsRulesFileCheck: false,
+				exportAllSessionsRequested: true,
+			}
+		}
+
+		if (commandName === "export_all_dialogs") {
+			return {
+				processedText: textWithoutSlashCommand,
+				needsRulesFileCheck: false,
+				exportAllDialogsRequested: true,
+			}
+		}
+		// kilocode_change end
 
 		const command = commandReplacements[commandName]
 		if (command) {

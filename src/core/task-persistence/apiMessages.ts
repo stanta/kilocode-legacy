@@ -40,11 +40,15 @@ export type ApiMessage = Anthropic.MessageParam & {
 export async function readApiMessages({
 	taskId,
 	globalStoragePath,
+	workspaceRoot,
 }: {
 	taskId: string
 	globalStoragePath: string
+	workspaceRoot?: string
 }): Promise<ApiMessage[]> {
-	const taskDir = await getTaskDirectoryPath(globalStoragePath, taskId)
+	// kilocode_change start: project-local dialog session storage
+	const taskDir = await getTaskDirectoryPath(globalStoragePath, taskId, { workspaceRoot })
+	// kilocode_change end
 	const filePath = path.join(taskDir, GlobalFileNames.apiConversationHistory)
 
 	if (await fileExistsAtPath(filePath)) {
@@ -98,12 +102,16 @@ export async function saveApiMessages({
 	messages,
 	taskId,
 	globalStoragePath,
+	workspaceRoot,
 }: {
 	messages: ApiMessage[]
 	taskId: string
 	globalStoragePath: string
+	workspaceRoot?: string
 }) {
-	const taskDir = await getTaskDirectoryPath(globalStoragePath, taskId)
+	// kilocode_change start: project-local dialog session storage
+	const taskDir = await getTaskDirectoryPath(globalStoragePath, taskId, { workspaceRoot })
+	// kilocode_change end
 	const filePath = path.join(taskDir, GlobalFileNames.apiConversationHistory)
 	await safeWriteJson(filePath, messages)
 }

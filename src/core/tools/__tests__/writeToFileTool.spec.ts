@@ -131,6 +131,7 @@ describe("writeToFileTool", () => {
 					diagnosticsEnabled: true,
 					writeDelayMs: 1000,
 				}),
+				getEffectiveApiConfiguration: vi.fn().mockResolvedValue({}),
 			}),
 		}
 		mockCline.rooIgnoreController = {

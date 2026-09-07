@@ -46,6 +46,7 @@ describe("webviewMessageHandler - checkpoint operations", () => {
 				{ ts: 4, role: "assistant", content: [{ type: "text", text: "After message" }] },
 			],
 			checkpointRestore: vi.fn(),
+			handleWebviewAskResponse: vi.fn(),
 			overwriteClineMessages: vi.fn(),
 			overwriteApiConversationHistory: vi.fn(),
 		}
@@ -54,6 +55,7 @@ describe("webviewMessageHandler - checkpoint operations", () => {
 		// Setup mock provider
 		mockProvider = {
 			getCurrentTask: vi.fn(() => mockCline),
+			cancelTask: vi.fn().mockResolvedValue(undefined),
 			postMessageToWebview: vi.fn(),
 			getTaskWithId: vi.fn(() => ({
 				historyItem: { id: "test-task-123", messages: mockCline.clineMessages },
@@ -63,11 +65,55 @@ describe("webviewMessageHandler - checkpoint operations", () => {
 			contextProxy: {
 				globalStorageUri: { fsPath: "/test/storage" },
 			},
+			cwd: "/test/workspace",
 			getState: vi.fn().mockResolvedValue({
 				maxImageFileSize: 5,
 				maxTotalImageSize: 20,
 			}),
 		}
+	})
+
+	describe("direct checkpoint restore payload validation", () => {
+		it("should abort restore when taskId does not match current task", async () => {
+			await webviewMessageHandler(mockProvider, {
+				type: "checkpointRestore",
+				payload: {
+					taskId: "different-task",
+					ts: 2,
+					commitHash: "abc123",
+					mode: "restore",
+				},
+			} as any)
+
+			expect(mockProvider.cancelTask).not.toHaveBeenCalled()
+			expect(mockCline.checkpointRestore).not.toHaveBeenCalled()
+		})
+
+		it("should acknowledge workspace restore staleness", async () => {
+			mockProvider.acknowledgeWorkspaceRestoreStaleness = vi.fn()
+
+			await webviewMessageHandler(mockProvider, {
+				type: "askResponse",
+				askResponse: "workspace_restore_acknowledged",
+			} as any)
+
+			expect(mockProvider.acknowledgeWorkspaceRestoreStaleness).toHaveBeenCalled()
+			expect(mockCline.handleWebviewAskResponse).not.toHaveBeenCalled()
+		})
+
+		it("should block ask responses while workspace restore staleness is unacknowledged", async () => {
+			mockProvider.ensureWorkspaceRestoreAcknowledged = vi.fn(() => {
+				throw new Error("Workspace restore requires acknowledgement before continuing")
+			})
+
+			await webviewMessageHandler(mockProvider, {
+				type: "askResponse",
+				askResponse: "messageResponse",
+				text: "continue",
+			} as any)
+
+			expect(mockCline.handleWebviewAskResponse).not.toHaveBeenCalled()
+		})
 	})
 
 	describe("delete operations with checkpoint restoration", () => {
@@ -106,6 +152,7 @@ describe("webviewMessageHandler - checkpoint operations", () => {
 				messages: expect.any(Array),
 				taskId: "test-task-123",
 				globalStoragePath: "/test/storage",
+				workspaceRoot: "/test/workspace",
 			})
 
 			// Verify checkpoint restore was NOT called

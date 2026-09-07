@@ -467,6 +467,45 @@ describe("ChatView - Sound Playing Tests", () => {
 	})
 })
 
+describe("ChatView - Workspace restore staleness", () => {
+	beforeEach(() => vi.clearAllMocks())
+
+	it("blocks input and posts acknowledgement when workspace was restored by another session", async () => {
+		const { getByTestId } = renderChatView()
+
+		mockPostMessage({
+			currentTaskItem: { id: "task-123", ts: Date.now(), task: "Test task" },
+			clineMessages: [
+				{
+					type: "say",
+					say: "task",
+					ts: Date.now() - 1000,
+					text: "Task in progress",
+				},
+			],
+			staleWorkspaceRestore: {
+				sourceTaskId: "other-task",
+				commitHash: "abc123",
+				acknowledged: false,
+			},
+		})
+
+		await waitFor(() => {
+			expect(getByTestId("workspace-restore-stale-banner")).toBeInTheDocument()
+		})
+
+		const input = getByTestId("chat-textarea").querySelector("input")!
+		expect(input.getAttribute("data-sending-disabled")).toBe("true")
+
+		fireEvent.click(getByTestId("workspace-restore-acknowledge-btn"))
+
+		expect(vscode.postMessage).toHaveBeenCalledWith({
+			type: "askResponse",
+			askResponse: "workspace_restore_acknowledged",
+		})
+	})
+})
+
 describe("ChatView - Focus Grabbing Tests", () => {
 	beforeEach(() => vi.clearAllMocks())
 

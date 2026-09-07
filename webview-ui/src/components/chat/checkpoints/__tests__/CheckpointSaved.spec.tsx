@@ -32,6 +32,13 @@ import { render, waitFor, screen, fireEvent } from "@/utils/test-utils"
 import React from "react"
 import userEvent from "@testing-library/user-event"
 import { CheckpointSaved } from "../CheckpointSaved"
+import { vscode } from "@/utils/vscode"
+
+vi.mock("@/utils/vscode", () => ({
+	vscode: {
+		postMessage: vi.fn(),
+	},
+}))
 
 const waitForOpenHandler = async () => {
 	await waitFor(() => {
@@ -45,9 +52,15 @@ describe("CheckpointSaved popover visibility", () => {
 	const baseProps = {
 		ts: 123,
 		commitHash: "abc123",
+		taskId: "task-123",
 		currentHash: "zzz999",
 		checkpoint: { from: "prev123", to: "abc123" } as Record<string, unknown>,
 	}
+
+	afterEach(() => {
+		vi.clearAllMocks()
+		lastOnOpenChange = undefined
+	})
 
 	it("shows menu while popover is open and hides when closed", async () => {
 		const { getByTestId } = render(<CheckpointSaved {...baseProps} />)
@@ -159,6 +172,32 @@ describe("CheckpointSaved popover visibility", () => {
 
 		await waitFor(() => {
 			expect(menuContainer().className).toContain("hidden")
+		})
+	})
+
+	it("includes task id in checkpoint restore payloads", async () => {
+		const { getByTestId, container } = render(<CheckpointSaved {...baseProps} />)
+		const getParentDiv = () =>
+			container.querySelector("[class*='flex items-center justify-between']") as HTMLElement
+
+		fireEvent.mouseEnter(getParentDiv())
+		await waitForOpenHandler()
+		lastOnOpenChange?.(true)
+
+		await userEvent.click(getByTestId("restore-files-btn"))
+
+		expect(vscode.postMessage).toHaveBeenCalledWith({
+			type: "checkpointRestore",
+			payload: { taskId: "task-123", ts: 123, commitHash: "abc123", mode: "preview" },
+		})
+
+		lastOnOpenChange?.(true)
+		await userEvent.click(getByTestId("restore-files-and-task-btn"))
+		await userEvent.click(getByTestId("confirm-restore-btn"))
+
+		expect(vscode.postMessage).toHaveBeenCalledWith({
+			type: "checkpointRestore",
+			payload: { taskId: "task-123", ts: 123, commitHash: "abc123", mode: "restore" },
 		})
 	})
 

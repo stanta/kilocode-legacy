@@ -17,6 +17,41 @@ import { processUserContentMentions } from "../../mentions/processUserContentMen
 import { MultiSearchReplaceDiffStrategy } from "../../diff/strategies/multi-search-replace"
 import { MultiFileSearchReplaceDiffStrategy } from "../../diff/strategies/multi-file-search-replace"
 import { EXPERIMENT_IDS } from "../../../shared/experiments"
+import { readApiMessages } from "../../task-persistence"
+
+const hoistedTaskPersistenceMocks = vi.hoisted(() => ({
+	readApiMessages: vi.fn().mockResolvedValue([]),
+	saveApiMessages: vi.fn().mockResolvedValue(undefined),
+	readTaskMessages: vi.fn().mockResolvedValue([]),
+	saveTaskMessages: vi.fn().mockResolvedValue(undefined),
+	taskMetadata: vi.fn().mockResolvedValue({
+		historyItem: {
+			id: "test-task-id",
+			number: 1,
+			task: "Test task",
+			ts: Date.now(),
+			totalCost: 0.01,
+			tokensIn: 100,
+			tokensOut: 50,
+		},
+		tokenUsage: {
+			totalTokensIn: 100,
+			totalTokensOut: 50,
+			totalCost: 0.01,
+			contextTokens: 150,
+			totalCacheWrites: 0,
+			totalCacheReads: 0,
+		},
+	}),
+}))
+
+vi.mock("../../task-persistence", () => ({
+	readApiMessages: hoistedTaskPersistenceMocks.readApiMessages,
+	saveApiMessages: hoistedTaskPersistenceMocks.saveApiMessages,
+	readTaskMessages: hoistedTaskPersistenceMocks.readTaskMessages,
+	saveTaskMessages: hoistedTaskPersistenceMocks.saveTaskMessages,
+	taskMetadata: hoistedTaskPersistenceMocks.taskMetadata,
+}))
 
 // Mock delay before any imports that might use it
 vi.mock("delay", () => ({
@@ -1423,9 +1458,61 @@ describe("Cline", () => {
 				await iterator.next()
 
 				// Access the private static property via reflection for testing
-				const globalTimestamp = (Task as any).lastGlobalApiRequestTime
+				const globalTimestamp = (Task as any).scopedApiRequestTimes.values().next().value
 				expect(globalTimestamp).toBeDefined()
 				expect(globalTimestamp).toBeGreaterThan(0)
+			})
+
+			it("should not throttle different provider/profile/model combinations", async () => {
+				const parent = new Task({
+					provider: mockProvider,
+					apiConfiguration: mockApiConfig,
+					task: "parent task",
+					startTask: false,
+					context: mockExtensionContext,
+				})
+				parent.setSessionModeBinding({
+					mode: "code",
+					apiConfigName: "profile-a",
+					apiConfiguration: { ...mockApiConfig, apiModelId: "model-a" },
+				})
+
+				const mockStream = {
+					async *[Symbol.asyncIterator]() {
+						yield { type: "text", text: "response" }
+					},
+					async next() {
+						return { done: true, value: { type: "text", text: "response" } }
+					},
+					async return() {
+						return { done: true, value: undefined }
+					},
+					async throw(e: any) {
+						throw e
+					},
+					[Symbol.asyncDispose]: async () => {},
+				} as AsyncGenerator<ApiStreamChunk>
+
+				vi.spyOn(parent.api, "createMessage").mockReturnValue(mockStream)
+				await parent.attemptApiRequest(0).next()
+
+				const child = new Task({
+					provider: mockProvider,
+					apiConfiguration: mockApiConfig,
+					task: "child task",
+					startTask: false,
+					context: mockExtensionContext,
+				})
+				child.setSessionModeBinding({
+					mode: "code",
+					apiConfigName: "profile-b",
+					apiConfiguration: { ...mockApiConfig, apiModelId: "model-b" },
+				})
+				vi.spyOn(child.api, "createMessage").mockReturnValue(mockStream)
+
+				await child.attemptApiRequest(0).next()
+
+				expect(mockDelay).not.toHaveBeenCalled()
 			})
 		})
 
@@ -1468,6 +1555,25 @@ describe("Cline", () => {
 				// Initially should be MultiSearchReplaceDiffStrategy
 				expect(task.diffStrategy).toBeInstanceOf(MultiSearchReplaceDiffStrategy)
 				expect(task.diffStrategy?.getName()).toBe("MultiSearchReplace")
+			})
+
+			it("passes workspaceRoot when reading saved API conversation history", async () => {
+				const task = new Task({
+					provider: mockProvider,
+					apiConfiguration: mockApiConfig,
+					task: "test task",
+					startTask: false,
+					context: mockExtensionContext,
+					workspacePath: "/mock/workspace/path",
+				})
+
+				await (task as any).getSavedApiConversationHistory()
+
+				expect(vi.mocked(readApiMessages)).toHaveBeenCalledWith({
+					taskId: task.taskId,
+					globalStoragePath: "/test/storage",
+					workspaceRoot: "/mock/workspace/path",
+				})
 			})
 
 			it("should switch to MultiFileSearchReplaceDiffStrategy when experiment is enabled", async () => {
@@ -2114,6 +2220,42 @@ describe("Queued message processing after condense", () => {
 
 		expect(spyB).toHaveBeenCalledWith("B message", undefined)
 		expect(taskB.messageQueueService.isEmpty()).toBe(true)
+	})
+
+	it("preserves condensing settings captured at task creation time", async () => {
+		const provider = createProvider()
+		provider.getState = vi
+			.fn()
+			.mockResolvedValueOnce({
+				condensingApiConfigId: "profile-a",
+				customCondensingPrompt: "prompt-a",
+				listApiConfigMeta: [],
+			})
+			.mockResolvedValue({
+				condensingApiConfigId: "profile-b",
+				customCondensingPrompt: "prompt-b",
+				listApiConfigMeta: [],
+			})
+
+		const task = new Task({
+			provider,
+			apiConfiguration: apiConfig,
+			task: "initial task",
+			startTask: false,
+			context: provider.context,
+		})
+
+		const runtime = await (task as any).ensureSessionCondensingSettings()
+		expect(runtime).toEqual({
+			condensingApiConfigId: "profile-a",
+			customCondensingPrompt: "prompt-a",
+		})
+
+		const restoredRuntime = await (task as any).ensureSessionCondensingSettings()
+		expect(restoredRuntime).toEqual({
+			condensingApiConfigId: "profile-a",
+			customCondensingPrompt: "prompt-a",
+		})
 	})
 })
 

@@ -220,7 +220,7 @@ export class ExtensionHost extends EventEmitter {
 		sessionId: string
 		uiMessages: unknown[]
 		apiConversationHistory: unknown[]
-		metadata: { sessionId: string; title: string; createdAt: string; mode: string | null }
+		metadata: { sessionId: string; title: string; createdAt: string; mode: string | null; model: string | null } // kilocode_change
 	}): Promise<ExtensionAPI> {
 		if (this.isActivated) {
 			return this.getAPI()
@@ -1184,7 +1184,7 @@ export class ExtensionHost extends EventEmitter {
 			throw new Error("Cannot write task history: globalStoragePath not available")
 		}
 
-		const tasksDir = path.join(globalStoragePath, "tasks")
+		const tasksDir = await this.getDialogSessionsTasksDir(globalStoragePath)
 		const taskDir = path.join(tasksDir, taskId)
 
 		// Create task directory if it doesn't exist
@@ -1206,6 +1206,68 @@ export class ExtensionHost extends EventEmitter {
 		})
 	}
 
+	private async getDialogSessionsTasksDir(globalStoragePath: string): Promise<string> {
+		// kilocode_change start: project-local dialog session storage
+		const path = await import("path")
+		const configuredPath = await this.readProjectDialogSessionsPath()
+
+		if (configuredPath) {
+			return configuredPath
+		}
+
+		return path.join(globalStoragePath, "tasks")
+	}
+
+	private async readProjectDialogSessionsPath(): Promise<string | undefined> {
+		// kilocode_change start: project-local dialog session storage
+		const fs = await import("fs/promises")
+		const path = await import("path")
+		const workspacePath = this.options.workspacePath
+		const configPaths = [
+			path.join(workspacePath, ".kilo", "config.json"),
+			path.join(workspacePath, ".kilocode", "config.json"),
+		]
+
+		for (const configPath of configPaths) {
+			try {
+				const parsedConfig = JSON.parse(await fs.readFile(configPath, "utf8")) as {
+					project?: { dialog_sessions_path?: unknown }
+				}
+				const configuredPath = parsedConfig.project?.dialog_sessions_path
+
+				if (
+					typeof configuredPath !== "string" ||
+					configuredPath.trim().length === 0 ||
+					path.isAbsolute(configuredPath)
+				) {
+					continue
+				}
+
+				const resolvedWorkspacePath = path.resolve(workspacePath)
+				const resolvedPath = path.resolve(resolvedWorkspacePath, configuredPath)
+
+				if (
+					resolvedPath === resolvedWorkspacePath ||
+					resolvedPath.startsWith(`${resolvedWorkspacePath}${path.sep}`)
+				) {
+					await fs.mkdir(resolvedPath, { recursive: true })
+					return resolvedPath
+				}
+			} catch (error) {
+				const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined
+				if (code !== "ENOENT") {
+					logs.warn("Failed to read dialog_sessions_path from project config", "ExtensionHost", {
+						configPath,
+						error: error instanceof Error ? error.message : String(error),
+					})
+				}
+			}
+		}
+
+		return undefined
+		// kilocode_change end
+	}
+
 	/**
 	 * Pre-seed task history for resume BEFORE extension activation.
 	 * This ensures the extension can find the task when showTaskWithId is called.
@@ -1215,7 +1277,7 @@ export class ExtensionHost extends EventEmitter {
 		sessionId: string
 		uiMessages: unknown[]
 		apiConversationHistory: unknown[]
-		metadata: { sessionId: string; title: string; createdAt: string; mode: string | null }
+		metadata: { sessionId: string; title: string; createdAt: string; mode: string | null; model: string | null } // kilocode_change
 	}): Promise<void> {
 		logs.info("Pre-seeding task history for resume", "ExtensionHost", {
 			sessionId: resumeData.sessionId,

@@ -116,6 +116,7 @@ describe("editFileTool", () => {
 					writeDelayMs: 1000,
 					experiments: {},
 				}),
+				getEffectiveApiConfiguration: vi.fn().mockResolvedValue({}),
 			}),
 		}
 		mockTask.rooIgnoreController = {

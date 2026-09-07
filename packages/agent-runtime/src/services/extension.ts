@@ -259,7 +259,7 @@ export class ExtensionService extends EventEmitter {
 		sessionId: string
 		uiMessages: unknown[]
 		apiConversationHistory: unknown[]
-		metadata: { sessionId: string; title: string; createdAt: string; mode: string | null }
+		metadata: { sessionId: string; title: string; createdAt: string; mode: string | null; model: string | null } // kilocode_change
 	}): Promise<void> {
 		if (this.isInitialized) {
 			logs.warn("Extension service already initialized", "ExtensionService")

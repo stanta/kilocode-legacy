@@ -4,7 +4,7 @@ import { VSCodeButton } from "@vscode/webview-ui-toolkit/react"
 import { useCallback, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-export const SeeNewChangesButtons = ({ commitRange }: { commitRange: CommitRange }) => {
+export const SeeNewChangesButtons = ({ commitRange, taskId }: { commitRange: CommitRange; taskId?: string }) => {
 	const { t } = useTranslation()
 	const [revertingChanges, setRevertingChanges] = useState(false)
 
@@ -23,12 +23,13 @@ export const SeeNewChangesButtons = ({ commitRange }: { commitRange: CommitRange
 		vscode.postMessage({
 			type: "checkpointRestore",
 			payload: {
+				taskId: taskId ?? "",
 				mode: "restore",
 				ts: commitRange.fromTimeStamp ?? 0,
 				commitHash: commitRange.from,
 			},
 		})
-	}, [commitRange])
+	}, [commitRange, taskId])
 
 	const cancelRevertChangesCallback = useCallback(() => setRevertingChanges(false), [])
 

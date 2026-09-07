@@ -6,6 +6,7 @@ import * as path from "path"
 import { promises as fs } from "fs"
 import * as os from "os"
 import { getKilocodeConfigFile, getProjectId, normalizeProjectId } from "../kilo-config-file"
+import { resolveDialogSessionsPath } from "../storage"
 
 describe("project-config", () => {
 	let tempDir: string
@@ -59,6 +60,7 @@ describe("project-config", () => {
 				JSON.stringify({
 					project: {
 						id: "my-project",
+						dialog_sessions_path: ".kilo/dialogs",
 					},
 				}),
 			)
@@ -68,8 +70,50 @@ describe("project-config", () => {
 			expect(config).toEqual({
 				project: {
 					id: "my-project",
+					dialog_sessions_path: ".kilo/dialogs",
 				},
 			})
+		})
+
+		it("returns config from .kilo/config.json when .kilocode/config.json is absent", async () => {
+			const kiloDir = path.join(tempDir, ".kilo")
+			await fs.mkdir(kiloDir, { recursive: true })
+			await fs.writeFile(
+				path.join(kiloDir, "config.json"),
+				JSON.stringify({
+					project: {
+						id: "my-project",
+						dialog_sessions_path: ".kilo/dialogs",
+					},
+				}),
+			)
+
+			const config = await getKilocodeConfigFile(tempDir)
+
+			expect(config).toEqual({
+				project: {
+					id: "my-project",
+					dialog_sessions_path: ".kilo/dialogs",
+				},
+			})
+		})
+
+		it("prefers .kilo/config.json over .kilocode/config.json", async () => {
+			await fs.mkdir(path.join(tempDir, ".kilocode"), { recursive: true })
+			await fs.writeFile(
+				path.join(tempDir, ".kilocode", "config.json"),
+				JSON.stringify({ project: { id: "legacy-project", dialog_sessions_path: ".kilocode/dialogs" } }),
+			)
+			await fs.mkdir(path.join(tempDir, ".kilo"), { recursive: true })
+			await fs.writeFile(
+				path.join(tempDir, ".kilo", "config.json"),
+				JSON.stringify({ project: { id: "kilo-project", dialog_sessions_path: ".kilo/dialogs" } }),
+			)
+
+			const config = await getKilocodeConfigFile(tempDir)
+
+			expect(config?.project?.id).toBe("kilo-project")
+			expect(config?.project?.dialog_sessions_path).toBe(".kilo/dialogs")
 		})
 
 		it("returns null when no config file exists", async () => {
@@ -86,6 +130,20 @@ describe("project-config", () => {
 			const config = await getKilocodeConfigFile(tempDir)
 
 			expect(config).toBeNull()
+		})
+	})
+
+	describe("resolveDialogSessionsPath", () => {
+		it("resolves relative dialog_sessions_path inside the workspace", () => {
+			expect(resolveDialogSessionsPath(tempDir, ".kilo/dialogs")).toBe(path.join(tempDir, ".kilo", "dialogs"))
+		})
+
+		it("rejects absolute dialog_sessions_path values", () => {
+			expect(resolveDialogSessionsPath(tempDir, "/outside/dialogs")).toBeUndefined()
+		})
+
+		it("rejects dialog_sessions_path traversal outside the workspace", () => {
+			expect(resolveDialogSessionsPath(tempDir, "../outside/dialogs")).toBeUndefined()
 		})
 	})
 

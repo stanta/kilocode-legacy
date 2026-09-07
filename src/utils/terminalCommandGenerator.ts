@@ -7,6 +7,7 @@ import { singleCompletionHandler } from "./single-completion-handler"
 import type { ProviderSettings } from "@roo-code/types"
 import { t } from "../i18n"
 import { getLatestTerminalOutput } from "../core/mentions"
+import { ClineProvider } from "../core/webview/ClineProvider"
 
 export interface TerminalCommandGeneratorOptions {
 	outputChannel: vscode.OutputChannel
@@ -157,7 +158,10 @@ async function getApiConfiguration(context: vscode.ExtensionContext): Promise<Pr
 		throw new Error("ContextProxy not initialized")
 	}
 
-	const apiConfiguration = contextProxy.getProviderSettings()
+	const visibleProvider = await ClineProvider.getInstance()
+	const apiConfiguration = visibleProvider
+		? await visibleProvider.getEffectiveApiConfiguration()
+		: contextProxy.getProviderSettings()
 	const terminalCommandApiConfigId = contextProxy.getValue("terminalCommandApiConfigId")
 	const listApiConfigMeta = contextProxy.getValue("listApiConfigMeta") || []
 

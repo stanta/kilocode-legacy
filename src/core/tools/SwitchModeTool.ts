@@ -46,7 +46,7 @@ export class SwitchModeTool extends BaseTool<"switch_mode"> {
 			}
 
 			// Check if already in requested mode
-			const currentMode = (await task.providerRef.deref()?.getState())?.mode ?? defaultModeSlug
+			const currentMode = await task.getTaskMode()
 
 			if (currentMode === mode_slug) {
 				task.recordToolError("switch_mode")
@@ -62,7 +62,7 @@ export class SwitchModeTool extends BaseTool<"switch_mode"> {
 				return
 			}
 
-			// Switch the mode using shared handler
+			// Switch the mode using the session-local shared handler
 			await task.providerRef.deref()?.handleModeSwitch(mode_slug)
 
 			pushToolResult(

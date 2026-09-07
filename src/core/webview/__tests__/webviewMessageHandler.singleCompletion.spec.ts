@@ -28,6 +28,7 @@ const mockSingleCompletionHandler = singleCompletionHandler.singleCompletionHand
 // Mock ClineProvider
 const mockClineProvider = {
 	getState: vi.fn(),
+	getEffectiveApiConfiguration: vi.fn(),
 	postMessageToWebview: vi.fn(),
 	log: vi.fn(),
 	contextProxy: {
@@ -45,6 +46,11 @@ describe("webviewMessageHandler - singleCompletion", () => {
 				apiKey: "test-key",
 				apiModelId: "claude-3-5-sonnet-20241022",
 			},
+		})
+		mockClineProvider.getEffectiveApiConfiguration = vi.fn().mockResolvedValue({
+			apiProvider: "anthropic",
+			apiKey: "test-key",
+			apiModelId: "claude-3-5-sonnet-20241022",
 		})
 	})
 

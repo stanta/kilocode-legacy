@@ -1,7 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import { CommitMessageGenerator } from "../CommitMessageGenerator"
 import { ProviderSettingsManager } from "../../../core/config/ProviderSettingsManager"
+import { ContextProxy } from "../../../core/config/ContextProxy"
 import { GenerateMessageParams, ProgressUpdate } from "../types/core"
+import { singleCompletionHandler } from "../../../utils/single-completion-handler"
+
+vi.mock("@roo-code/telemetry", () => ({
+	TelemetryService: {
+		instance: {
+			captureEvent: vi.fn(),
+		},
+	},
+}))
+
+vi.mock("../../../utils/single-completion-handler", () => ({
+	singleCompletionHandler: vi.fn(),
+}))
 
 describe("CommitMessageGenerator", () => {
 	let generator: CommitMessageGenerator
@@ -29,6 +43,7 @@ index 0000000..123
 		} as any
 
 		generator = new CommitMessageGenerator(mockProviderSettingsManager)
+		vi.mocked(singleCompletionHandler).mockResolvedValue("feat: test")
 	})
 
 	describe("class instantiation", () => {
@@ -118,6 +133,34 @@ index 0000000..123
 			await expect(async () => {
 				await generator.generateMessage(invalidParams)
 			}).rejects.toThrow()
+		})
+
+		it("uses injected session-effective configuration when provided", async () => {
+			Object.defineProperty(ContextProxy, "instance", {
+				get: vi.fn(() => ({
+					isInitialized: false,
+					getValue: vi.fn(),
+					getProviderSettings: vi.fn(),
+				})),
+				configurable: true,
+			})
+			const resolveApiConfiguration = vi.fn().mockResolvedValue({
+				apiProvider: "openrouter",
+				apiKey: "session-key",
+			})
+			const sessionGenerator = new CommitMessageGenerator(mockProviderSettingsManager, resolveApiConfiguration)
+
+			await sessionGenerator.generateMessage({
+				workspacePath: "/test/workspace",
+				selectedFiles: [],
+				gitContext: mockGitContext,
+			})
+
+			expect(resolveApiConfiguration).toHaveBeenCalled()
+			expect(singleCompletionHandler).toHaveBeenCalledWith(
+				expect.objectContaining({ apiProvider: "openrouter", apiKey: "session-key" }),
+				expect.any(String),
+			)
 		})
 	})
 })

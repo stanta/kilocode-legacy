@@ -56,6 +56,12 @@ describe("Single-open-task invariant", () => {
 			removeClineFromStack,
 			addClineToStack,
 			setProviderProfile: vi.fn(),
+			getRuntimeProviderProfile: vi.fn().mockReturnValue({
+				currentApiConfigName: "default",
+				apiConfiguration: { apiProvider: "anthropic", consecutiveMistakeLimit: 0 },
+				currentMode: "code",
+			}),
+			setRuntimeMode: vi.fn(),
 			log: vi.fn(),
 			getStateToPostToWebview: vi.fn(),
 			providerSettingsManager: { getModeConfigId: vi.fn(), listConfig: vi.fn() },

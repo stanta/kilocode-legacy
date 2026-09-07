@@ -14,7 +14,11 @@ import { getApiMetrics } from "../../shared/getApiMetrics"
 
 import { DIFF_VIEW_URI_SCHEME } from "../../integrations/editor/DiffViewProvider"
 
-import { CheckpointServiceOptions, RepoPerTaskCheckpointService } from "../../services/checkpoints"
+import {
+	CheckpointServiceOptions,
+	RepoPerTaskCheckpointService,
+	WorkspaceCheckpointCoordinator,
+} from "../../services/checkpoints"
 
 // kilocode_change start
 import { TelemetryEventName } from "@roo-code/types"
@@ -250,6 +254,7 @@ export type CheckpointRestoreOptions = {
 	commitHash: string
 	mode: "preview" | "restore"
 	operation?: "delete" | "edit" // Optional to maintain backward compatibility
+	taskId?: string
 }
 
 export async function checkpointRestore(
@@ -269,11 +274,22 @@ export async function checkpointRestore(
 	}
 
 	const provider = task.providerRef.deref()
+	const workspaceDir = task.cwd || getWorkspacePath()
 
 	try {
-		await service.restoreCheckpoint(commitHash)
+		if (!workspaceDir) {
+			throw new Error("Workspace folder not found for checkpoint restore")
+		}
+
+		await WorkspaceCheckpointCoordinator.withWorkspaceLock(workspaceDir, async () => {
+			await service.restoreCheckpoint(commitHash)
+		})
 		TelemetryService.instance.captureCheckpointRestored(task.taskId)
 		await provider?.postMessageToWebview({ type: "currentCheckpointUpdated", text: commitHash })
+		WorkspaceCheckpointCoordinator.broadcastRestore(workspaceDir, {
+			sourceTaskId: task.taskId,
+			commitHash,
+		})
 
 		if (mode === "restore") {
 			// Calculate metrics from messages that will be deleted (must be done before rewind)
