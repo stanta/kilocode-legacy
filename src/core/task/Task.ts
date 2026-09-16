@@ -1497,7 +1497,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// kilocode_change end
 		} catch (error) {
 			// In the off chance this fails, we don't want to stop the task.
-			console.error("Failed to save API conversation history:", error)
+			// kilocode_change start: identify incomplete tasks without exposing message content
+			console.error(
+				`[Task#${this.taskId}.${this.instanceId}] Failed to save API conversation history ` +
+					`(messages=${this.apiConversationHistory.length}, storage=${this.globalStoragePath}):`,
+				error,
+			)
+			// kilocode_change end
 		}
 	}
 
@@ -2336,6 +2342,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		await this.providerRef.deref()?.postStateToWebview()
 
 		await this.say("text", task, images)
+		// kilocode_change start: create both task history files before expensive context preparation.
+		// If the extension host is terminated while collecting mentions/environment details,
+		// the task remains resumable instead of becoming an indexed task with no API history file.
+		await this.saveApiConversationHistory()
+		// kilocode_change end
 		this.isInitialized = true
 
 		let imageBlocks: Anthropic.ImageBlockParam[] = formatResponse.imageBlocks(images)
@@ -3025,6 +3036,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					apiProtocol,
 				}),
 			)
+			// kilocode_change start: trace the pre-request stage where incomplete task histories can be created
+			console.log(`[Task#${this.taskId}.${this.instanceId}] Preparing first API history message`)
+			// kilocode_change end
 
 			const {
 				showRooIgnoredFiles = false,
@@ -3046,6 +3060,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				maxDiagnosticMessages,
 				maxReadFileLine,
 			})
+			// kilocode_change start
+			console.log(`[Task#${this.taskId}.${this.instanceId}] User content mentions processed`)
+			// kilocode_change end
 
 			if (needsRulesFileCheck) {
 				await this.say(
@@ -3056,6 +3073,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// kilocode_change end
 
 			const environmentDetails = await getEnvironmentDetails(this, currentIncludeFileDetails)
+			// kilocode_change start
+			console.log(`[Task#${this.taskId}.${this.instanceId}] Environment details collected`)
+			// kilocode_change end
 
 			// Remove any existing environment_details blocks before adding fresh ones.
 			// This prevents duplicate environment details when resuming tasks with XML tool calls,
@@ -3093,6 +3113,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				((currentItem.retryAttempt ?? 0) === 0 && !isEmptyUserContent) || currentItem.userMessageWasRemoved
 			if (shouldAddUserMessage) {
 				await this.addToApiConversationHistory({ role: "user", content: finalUserContent })
+				// kilocode_change start
+				console.log(
+					`[Task#${this.taskId}.${this.instanceId}] First API history message persisted ` +
+						`(messages=${this.apiConversationHistory.length})`,
+				)
+				// kilocode_change end
 				TelemetryService.instance.captureConversationMessage(this.taskId, "user")
 			}
 
