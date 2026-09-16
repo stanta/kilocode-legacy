@@ -1924,6 +1924,33 @@ export class ClineProvider
 					apiConversationHistory,
 				}
 			} else {
+				// kilocode_change start: recover tasks interrupted before their first API-history write.
+				// UI messages are persisted and indexed before context preparation, so their presence is
+				// sufficient to distinguish an interrupted, recoverable task from a stale history entry.
+				if (await fileExistsAtPath(uiMessagesFilePath)) {
+					const uiMessages = await readTaskMessages({ taskId: id, globalStoragePath })
+					const hasPersistedTaskMessage = uiMessages.some(
+						(message) => message.type === "say" && message.say === "text",
+					)
+
+					if (hasPersistedTaskMessage) {
+						const apiConversationHistory: Anthropic.MessageParam[] = []
+						await saveApiMessages({ messages: apiConversationHistory, taskId: id, globalStoragePath })
+						this.log(
+							`[getTaskWithId] Recovered missing API conversation history for interrupted task ${id}`,
+						)
+
+						return {
+							historyItem,
+							taskDirPath,
+							apiConversationHistoryFilePath,
+							uiMessagesFilePath,
+							apiConversationHistory,
+						}
+					}
+				}
+				// kilocode_change end
+
 				if (kilo_withMessage) {
 					vscode.window.showErrorMessage(
 						`Task file not found for task ID: ${id} (file ${apiConversationHistoryFilePath})`,
