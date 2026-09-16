@@ -51,6 +51,7 @@ export enum TelemetryEventName {
 	GHOST_SERVICE_DISABLED = "Ghost Service Disabled",
 	ASK_APPROVAL = "Ask Approval",
 	MISSING_MANAGED_INDEXER = "Missing Managed Indexer",
+	CONTEXT_COMPOSITION_CAPTURED = "Context Composition Captured",
 
 	AGENT_MANAGER_OPENED = "Agent Manager Opened",
 	AGENT_MANAGER_SESSION_STARTED = "Agent Manager Session Started",

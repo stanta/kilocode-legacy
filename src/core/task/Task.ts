@@ -126,7 +126,13 @@ import {
 } from "../task-persistence"
 import { getTaskDirectoryPath } from "../../utils/storage"
 import { getEnvironmentDetails } from "../environment/getEnvironmentDetails"
-import { checkContextWindowExceededError } from "../context/context-management/context-error-handling"
+// kilocode_change start
+import { estimateContextComposition } from "../context-management/context-composition"
+import {
+	MAX_CONTEXT_WINDOW_RETRIES,
+	shouldAttemptContextWindowRecovery,
+} from "../context/context-management/context-window-recovery"
+// kilocode_change end
 import {
 	type CheckpointDiffOptions,
 	type CheckpointRestoreOptions,
@@ -168,7 +174,7 @@ import { deduplicateToolUseBlocks } from "./deduplicateToolUseBlocks"
 const MAX_EXPONENTIAL_BACKOFF_SECONDS = 600 // 10 minutes
 const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
 const FORCED_CONTEXT_REDUCTION_PERCENT = 75 // Keep 75% of context (remove 25%) on context window errors
-const MAX_CONTEXT_WINDOW_RETRIES = 3 // Maximum retries for context window errors
+// MAX_CONTEXT_WINDOW_RETRIES moved to context/context-management/context-window-recovery.ts (kilocode_change)
 // kilocode_change start
 const MAX_CHUTES_TERMINATED_RETRY_ATTEMPTS = 2 // Allow up to 2 retries (3 total attempts) before failing fast
 // kilocode_change end
@@ -4695,10 +4701,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}
 	// kilocode_change end
 
+	// kilocode_change start
 	public async *attemptApiRequest(
 		retryAttempt: number = 0,
-		options: { skipProviderRateLimit?: boolean } = {},
+		options: {
+			skipProviderRateLimit?: boolean
+			/** Number of context-window overflow recovery attempts already made for this request chain. */
+			contextWindowRetryAttempt?: number
+		} = {},
 	): ApiStream {
+		// kilocode_change end
 		const state = await this.providerRef.deref()?.getState()
 		const apiConfiguration = this.getSessionApiConfiguration()
 		const condensingSettings = await this.ensureSessionCondensingSettings()
@@ -5034,6 +5046,27 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Reset the flag after using it
 		this.skipPrevResponseIdOnce = false
 
+		// kilocode_change start
+		// Phase 0 context composition instrumentation: measure what the request
+		// payload is composed of (system prompt / environment details / tool
+		// results / task state / other history) and report it. Read-only - the
+		// payload below is never modified. Off by default; when the experiment
+		// flag is disabled this block is skipped entirely and behavior is
+		// identical to before.
+		if (experiments.isEnabled(state?.experiments ?? {}, EXPERIMENT_IDS.CONTEXT_COMPOSITION_INSTRUMENTATION)) {
+			try {
+				const composition = estimateContextComposition({
+					systemPrompt,
+					messages: cleanConversationHistory as ApiMessage[],
+				})
+				TelemetryService.instance.captureContextComposition(this.taskId, composition)
+			} catch (instrumentationError) {
+				// Instrumentation must never break the request.
+				console.warn(`[Task#${this.taskId}] Context composition instrumentation failed:`, instrumentationError)
+			}
+		}
+		// kilocode_change end
+
 		// The provider accepts reasoning items alongside standard messages; cast to the expected parameter type.
 		const stream = this.api.createMessage(
 			systemPrompt,
@@ -5126,7 +5159,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				const { response } = askResponse
 
 				this.currentRequestAbortController = undefined
-				const isContextWindowExceededError = checkContextWindowExceededError(error)
+				// kilocode_change: removed unused isContextWindowExceededError local;
+				// context-window overflow recovery is now handled generically in
+				// the shared first-chunk error path below.
 
 				if (response === "retry_clicked") {
 					yield* this.attemptApiRequest(retryAttempt + 1)
@@ -5144,6 +5179,47 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// outer request loop, which applies a bounded retry cap.
 			if (this.isChutesTerminatedError(error)) {
 				throw error
+			}
+			// kilocode_change end
+			// kilocode_change start
+			// Context-window overflow recovery: when the provider rejects the
+			// request because the prompt exceeds the model's context window,
+			// force a context reduction (condense with sliding-window fallback)
+			// and retry the request instead of immediately surfacing a failure.
+			// Bounded by MAX_CONTEXT_WINDOW_RETRIES so a conversation that keeps
+			// overflowing degrades to the generic error handling below rather
+			// than retrying forever. Non-context errors take the same paths as
+			// before.
+			const contextWindowRetryAttempt = options.contextWindowRetryAttempt ?? 0
+			if (shouldAttemptContextWindowRecovery(error, contextWindowRetryAttempt)) {
+				if (this.abort) {
+					throw new Error(
+						`[Task#attemptApiRequest] task ${this.taskId}.${this.instanceId} aborted during context window recovery`,
+					)
+				}
+				console.warn(
+					`[Task#attemptApiRequest] Context window exceeded (recovery attempt ${contextWindowRetryAttempt + 1}/${MAX_CONTEXT_WINDOW_RETRIES}); forcing context reduction and retrying.`,
+				)
+				let recoverySucceeded = false
+				try {
+					await this.handleContextWindowExceededError()
+					recoverySucceeded = true
+				} catch (recoveryError) {
+					// Recovery itself failed (e.g. condensing error); log and
+					// fall through to the generic error handling below so the
+					// user can still decide what to do.
+					console.error(
+						`[Task#attemptApiRequest] Context window recovery failed (attempt ${contextWindowRetryAttempt + 1}/${MAX_CONTEXT_WINDOW_RETRIES}):`,
+						recoveryError,
+					)
+				}
+				if (recoverySucceeded) {
+					yield* this.attemptApiRequest(retryAttempt + 1, {
+						...options,
+						contextWindowRetryAttempt: contextWindowRetryAttempt + 1,
+					})
+					return
+				}
 			}
 			// kilocode_change end
 			// note that this api_req_failed ask is unique in that we only present this option if the api hasn't streamed any content yet (ie it fails on the first chunk due), as it would allow them to hit a retry button. However if the api failed mid-stream, it could be in any arbitrary state where some tools may have executed, so that error is handled differently and requires cancelling the task entirely.
