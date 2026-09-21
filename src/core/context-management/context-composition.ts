@@ -10,7 +10,7 @@ import { ApiMessage } from "../task-persistence/apiMessages"
  * - systemPrompt: the static system prompt sent with the request
  * - environmentDetails: `<environment_details>` blocks embedded in user messages
  * - toolResults: native `tool_result` content blocks
- * - taskState: reserved for the U1 `TaskExecutionState` block (always 0 in Phase 0)
+ * - taskState: the bounded U1 `TaskExecutionState` block when enabled
  * - otherHistory: remaining conversation content
  *
  * This module never mutates or filters messages; it only measures. It is invoked
