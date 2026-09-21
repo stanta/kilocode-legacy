@@ -381,5 +381,9 @@ export async function getEnvironmentDetails(cline: Task, includeFileDetails: boo
 			? state.apiConfiguration.todoListEnabled
 			: true
 	const reminderSection = todoListEnabled ? formatReminderSection(cline.todoList) : ""
-	return `<environment_details>\n${details.trim()}\n${reminderSection}\n</environment_details>`
+	// kilocode_change start: U1 compact execution state is a bounded, runtime-owned projection.
+	const taskExecutionState = cline.getTaskExecutionStateBlock()
+	const taskStateSection = taskExecutionState ? `\n\n${taskExecutionState}` : ""
+	// kilocode_change end
+	return `<environment_details>\n${details.trim()}${taskStateSection}\n${reminderSection}\n</environment_details>`
 }
