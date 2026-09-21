@@ -135,7 +135,7 @@ describe("Context Composition Instrumentation (Phase 0)", () => {
 			expect(report.messageCount).toBe(1)
 		})
 
-		it("reserves taskState at zero in Phase 0 even when other categories are populated", () => {
+		it("keeps taskState at zero when no execution-state block is present", () => {
 			const message: ApiMessage = {
 				role: "user",
 				content: [{ type: "text", text: "<environment_details>x</environment_details>some text" }],
@@ -148,6 +148,20 @@ describe("Context Composition Instrumentation (Phase 0)", () => {
 			expect(report.categories.environmentDetails.chars).toBe(
 				"<environment_details>x</environment_details>".length,
 			)
+		})
+
+
+		it("attributes nested task execution state separately from environment details", () => {
+			const taskState = '<task_execution_state version="1" revision="2">{"currentGoal":"fix"}</task_execution_state>'
+			const envDetails = `<environment_details>before\n${taskState}\nafter</environment_details>`
+			const message: ApiMessage = { role: "user", content: [{ type: "text", text: envDetails }] }
+
+			const report = estimateContextComposition({ systemPrompt: "", messages: [message] })
+
+			expect(report.categories.taskState.chars).toBe(taskState.length)
+			expect(report.categories.environmentDetails.chars).toBe(envDetails.length - taskState.length)
+			expect(report.categories.otherHistory.chars).toBe(0)
+			expect(report.totalChars).toBe(envDetails.length)
 		})
 
 		it("never mutates the input messages", () => {
