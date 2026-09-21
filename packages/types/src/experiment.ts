@@ -6,7 +6,7 @@ import type { Keys, Equals, AssertEqual } from "./type-fu.js"
  * ExperimentId
  */
 
-const kilocodeExperimentIds = ["morphFastApply", "speechToText", "contextCompositionInstrumentation"] as const // kilocode_change
+const kilocodeExperimentIds = ["morphFastApply", "speechToText", "contextCompositionInstrumentation", "taskExecutionState"] as const // kilocode_change
 export const experimentIds = [
 	"powerSteering",
 	"multiFileApplyDiff",
@@ -29,6 +29,7 @@ export const experimentsSchema = z.object({
 	morphFastApply: z.boolean().optional(), // kilocode_change
 	speechToText: z.boolean().optional(), // kilocode_change
 	contextCompositionInstrumentation: z.boolean().optional(), // kilocode_change
+	taskExecutionState: z.boolean().optional(), // kilocode_change
 	powerSteering: z.boolean().optional(),
 	multiFileApplyDiff: z.boolean().optional(),
 	preventFocusDisruption: z.boolean().optional(),
