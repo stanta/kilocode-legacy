@@ -282,7 +282,8 @@ describe("mergeExtensionState", () => {
 				preventFocusDisruption: false,
 				morphFastApply: false, // kilocode_change
 				speechToText: false, // kilocode_change
-				contextCompositionInstrumentation: false, // kilocode_change
+				contextCompositionInstrumentation: false,
+					taskExecutionState: false, // kilocode_change
 				newTaskRequireTodos: false,
 				imageGeneration: false,
 				runSlashCommand: false,
@@ -306,7 +307,8 @@ describe("mergeExtensionState", () => {
 			preventFocusDisruption: false,
 			morphFastApply: false, // kilocode_change
 			speechToText: false, // kilocode_change
-			contextCompositionInstrumentation: false, // kilocode_change
+			contextCompositionInstrumentation: false,
+					taskExecutionState: false, // kilocode_change
 			newTaskRequireTodos: false,
 			imageGeneration: false,
 			runSlashCommand: false,
