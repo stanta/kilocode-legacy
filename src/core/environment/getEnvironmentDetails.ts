@@ -294,6 +294,13 @@ export async function getEnvironmentDetails(cline: Task, includeFileDetails: boo
 	details += `<name>${modeDetails.name}</name>\n`
 	details += `<model>${modelId}</model>\n`
 	details += `<tool_format>${toolProtocol}</tool_format>\n`
+	// kilocode_change start: keep bounded execution state close to stable task/session metadata,
+	// before browser/workspace details that can be substantially more dynamic and noisy.
+	const taskExecutionState = cline.getTaskExecutionStateBlock()
+	if (taskExecutionState) {
+		details += `\n${taskExecutionState}\n`
+	}
+	// kilocode_change end
 
 	if (Experiments.isEnabled(experiments ?? {}, EXPERIMENT_IDS.POWER_STEERING)) {
 		details += `<role>${modeDetails.roleDefinition}</role>\n`
@@ -381,9 +388,5 @@ export async function getEnvironmentDetails(cline: Task, includeFileDetails: boo
 			? state.apiConfiguration.todoListEnabled
 			: true
 	const reminderSection = todoListEnabled ? formatReminderSection(cline.todoList) : ""
-	// kilocode_change start: U1 compact execution state is a bounded, runtime-owned projection.
-	const taskExecutionState = cline.getTaskExecutionStateBlock()
-	const taskStateSection = taskExecutionState ? `\n\n${taskExecutionState}` : ""
-	// kilocode_change end
-	return `<environment_details>\n${details.trim()}${taskStateSection}\n${reminderSection}\n</environment_details>`
+	return `<environment_details>\n${details.trim()}\n${reminderSection}\n</environment_details>`
 }
