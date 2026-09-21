@@ -154,6 +154,9 @@ export function getTodoListForTask(cline: Task): TodoItem[] | undefined {
 export async function setTodoListForTask(cline?: Task, todos?: TodoItem[]) {
 	if (cline === undefined) return
 	cline.todoList = Array.isArray(todos) ? todos : []
+	// kilocode_change start: keep runtime-owned task execution state synchronized
+	await cline.syncTaskExecutionStateTodos(cline.todoList)
+	// kilocode_change end
 }
 
 export function restoreTodoListForTask(cline: Task, todoList?: TodoItem[]) {
