@@ -224,7 +224,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 	todoList?: TodoItem[]
 	// kilocode_change start: bounded execution state used as the compact working-state projection
-	private readonly taskExecutionStateEnabled: boolean
+	private taskExecutionStateEnabled: boolean
 	private taskStateManager?: TaskStateManager
 	// kilocode_change end
 
@@ -1324,24 +1324,36 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}
 
 	private async loadTaskExecutionState(): Promise<void> {
-		if (!this.taskExecutionStateEnabled) return
 		try {
 			const persisted = await readTaskExecutionState({
 				taskId: this.taskId,
 				globalStoragePath: this.globalStoragePath,
 				workspaceRoot: this.cwd,
 			})
-			this.taskStateManager =
-				TaskStateManager.fromUnknown(persisted) ??
-				TaskStateManager.create(this.metadata.task ?? "", this.todoList ?? [], "resume-fallback")
-			if (!persisted) await this.persistTaskExecutionState()
+
+			// Presence of persisted state is the session-level experiment lock.
+			// Legacy sessions without the file remain legacy even if the global flag
+			// is later enabled; flagged sessions remain enabled after restart.
+			if (!persisted) {
+				this.taskExecutionStateEnabled = false
+				this.taskStateManager = undefined
+				return
+			}
+
+			const manager = TaskStateManager.fromUnknown(persisted)
+			if (!manager) {
+				this.taskExecutionStateEnabled = false
+				this.taskStateManager = undefined
+				return
+			}
+			this.taskExecutionStateEnabled = true
+			this.taskStateManager = manager
 		} catch (error) {
-			console.warn(`[Task#${this.taskId}] Failed to load task execution state; using runtime fallback:`, error)
-			this.taskStateManager = TaskStateManager.create(
-				this.metadata.task ?? "",
-				this.todoList ?? [],
-				"resume-fallback",
-			)
+			// Corrupt/unreadable state degrades to legacy behavior rather than
+			// reconstructing semantic state from historical conversation text.
+			console.warn(`[Task#${this.taskId}] Failed to load task execution state; using legacy context:`, error)
+			this.taskExecutionStateEnabled = false
+			this.taskStateManager = undefined
 		}
 	}
 
