@@ -296,7 +296,8 @@ export async function getEnvironmentDetails(cline: Task, includeFileDetails: boo
 	details += `<tool_format>${toolProtocol}</tool_format>\n`
 	// kilocode_change start: keep bounded execution state close to stable task/session metadata,
 	// before browser/workspace details that can be substantially more dynamic and noisy.
-	const taskExecutionState = cline.getTaskExecutionStateBlock()
+	const taskExecutionState =
+		typeof cline.getTaskExecutionStateBlock === "function" ? cline.getTaskExecutionStateBlock() : ""
 	if (taskExecutionState) {
 		details += `\n${taskExecutionState}\n`
 	}
