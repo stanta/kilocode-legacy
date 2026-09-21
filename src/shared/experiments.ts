@@ -4,6 +4,7 @@ export const EXPERIMENT_IDS = {
 	MORPH_FAST_APPLY: "morphFastApply", // kilocode_change
 	SPEECH_TO_TEXT: "speechToText", // kilocode_change
 	CONTEXT_COMPOSITION_INSTRUMENTATION: "contextCompositionInstrumentation", // kilocode_change
+	TASK_EXECUTION_STATE: "taskExecutionState", // kilocode_change
 	MULTI_FILE_APPLY_DIFF: "multiFileApplyDiff",
 	POWER_STEERING: "powerSteering",
 	PREVENT_FOCUS_DISRUPTION: "preventFocusDisruption",
@@ -25,6 +26,7 @@ export const experimentConfigsMap: Record<ExperimentKey, ExperimentConfig> = {
 	MORPH_FAST_APPLY: { enabled: false }, // kilocode_change
 	SPEECH_TO_TEXT: { enabled: true }, // kilocode_change
 	CONTEXT_COMPOSITION_INSTRUMENTATION: { enabled: false }, // kilocode_change
+	TASK_EXECUTION_STATE: { enabled: false }, // kilocode_change
 	MULTI_FILE_APPLY_DIFF: { enabled: false },
 	POWER_STEERING: { enabled: false },
 	PREVENT_FOCUS_DISRUPTION: { enabled: false },
