@@ -65,6 +65,7 @@ export function estimateTokensFromChars(chars: number): number {
 // `<environment_details> ... </environment_details>` blocks produced by
 // getEnvironmentDetails() and embedded in user messages.
 const ENVIRONMENT_DETAILS_PATTERN = /<environment_details>[\s\S]*?<\/environment_details>/g
+const TASK_EXECUTION_STATE_PATTERN = /<task_execution_state\b[^>]*>[\s\S]*?<\/task_execution_state>/g
 
 function emptyCategory(): ContextCompositionCategorySize {
 	return { chars: 0, estTokens: 0 }
@@ -107,7 +108,13 @@ function classifyText(text: string, report: ContextCompositionReport): void {
 	}
 
 	for (const match of text.matchAll(ENVIRONMENT_DETAILS_PATTERN)) {
-		addChars(report, "environmentDetails", match[0].length)
+		const environmentBlock = match[0]
+		let taskStateChars = 0
+		for (const stateMatch of environmentBlock.matchAll(TASK_EXECUTION_STATE_PATTERN)) {
+			taskStateChars += stateMatch[0].length
+		}
+		addChars(report, "taskState", taskStateChars)
+		addChars(report, "environmentDetails", environmentBlock.length - taskStateChars)
 	}
 
 	// split() with the same pattern yields everything outside the matched
@@ -176,8 +183,8 @@ function classifyMessage(message: ApiMessage, report: ContextCompositionReport):
  * @param systemPrompt - The system prompt that will be sent with the request.
  * @param messages - The effective conversation history that will be sent.
  * @returns A report of char sizes and token estimates per category. The
- * `taskState` category is always zero in Phase 0 and is reserved for the U1
- * task-execution-state block.
+ * `taskState` is measured separately when the U1 task-execution-state block
+ * is present inside environment details.
  */
 export function estimateContextComposition({
 	systemPrompt,
@@ -189,9 +196,6 @@ export function estimateContextComposition({
 	const report = emptyReport()
 
 	addChars(report, "systemPrompt", systemPrompt?.length ?? 0)
-
-	// Reserved for the U1 task execution state block; measured once rendered.
-	addChars(report, "taskState", 0)
 
 	for (const message of messages ?? []) {
 		classifyMessage(message, report)
