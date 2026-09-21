@@ -122,10 +122,13 @@ import {
 	saveApiMessages,
 	readTaskMessages,
 	saveTaskMessages,
+	readTaskExecutionState,
+	saveTaskExecutionState,
 	taskMetadata,
 } from "../task-persistence"
 import { getTaskDirectoryPath } from "../../utils/storage"
 import { getEnvironmentDetails } from "../environment/getEnvironmentDetails"
+import { TaskStateManager } from "../task-state/TaskStateManager" // kilocode_change
 // kilocode_change start
 import { estimateContextComposition } from "../context-management/context-composition"
 import {
@@ -220,6 +223,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	readonly metadata: TaskMetadata
 
 	todoList?: TodoItem[]
+	// kilocode_change start: bounded execution state used as the compact working-state projection
+	private readonly taskExecutionStateEnabled: boolean
+	private taskStateManager?: TaskStateManager
+	// kilocode_change end
 
 	readonly rootTask: Task | undefined
 	readonly parentTask: Task | undefined
@@ -522,6 +529,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}: TaskOptions) {
 		super()
 		this.context = context // kilocode_change
+		// kilocode_change: fix the experiment variant for this Task instance so semantics do not flip mid-session.
+		this.taskExecutionStateEnabled = experiments.isEnabled(
+			experimentsConfig ?? {},
+			EXPERIMENT_IDS.TASK_EXECUTION_STATE,
+		)
 
 		if (startTask && !task && !images && !historyItem) {
 			throw new Error("Either historyItem or task/images must be provided")
@@ -1288,6 +1300,68 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		return [instance, promise]
 	}
+
+	// kilocode_change start: U1 task execution state lifecycle
+	private async persistTaskExecutionState(): Promise<void> {
+		if (!this.taskExecutionStateEnabled || !this.taskStateManager) return
+		try {
+			await saveTaskExecutionState({
+				state: this.taskStateManager.getSnapshot(),
+				taskId: this.taskId,
+				globalStoragePath: this.globalStoragePath,
+				workspaceRoot: this.cwd,
+			})
+		} catch (error) {
+			// State is an optimization layer. Persistence failure must never stop the task.
+			console.warn(`[Task#${this.taskId}] Failed to persist task execution state:`, error)
+		}
+	}
+
+	private async initializeTaskExecutionState(originalGoal?: string): Promise<void> {
+		if (!this.taskExecutionStateEnabled) return
+		this.taskStateManager = TaskStateManager.create(originalGoal ?? this.metadata.task ?? "", this.todoList ?? [])
+		await this.persistTaskExecutionState()
+	}
+
+	private async loadTaskExecutionState(): Promise<void> {
+		if (!this.taskExecutionStateEnabled) return
+		try {
+			const persisted = await readTaskExecutionState({
+				taskId: this.taskId,
+				globalStoragePath: this.globalStoragePath,
+				workspaceRoot: this.cwd,
+			})
+			this.taskStateManager =
+				TaskStateManager.fromUnknown(persisted) ??
+				TaskStateManager.create(this.metadata.task ?? "", this.todoList ?? [], "resume-fallback")
+			if (!persisted) await this.persistTaskExecutionState()
+		} catch (error) {
+			console.warn(`[Task#${this.taskId}] Failed to load task execution state; using runtime fallback:`, error)
+			this.taskStateManager = TaskStateManager.create(
+				this.metadata.task ?? "",
+				this.todoList ?? [],
+				"resume-fallback",
+			)
+		}
+	}
+
+	public getTaskExecutionStateBlock(): string {
+		if (!this.taskExecutionStateEnabled || !this.taskStateManager) return ""
+		return this.taskStateManager.render()
+	}
+
+	public async syncTaskExecutionStateTodos(todos: TodoItem[]): Promise<void> {
+		if (!this.taskExecutionStateEnabled) return
+		if (!this.taskStateManager) {
+			this.taskStateManager = TaskStateManager.create(this.metadata.task ?? "", todos)
+			await this.persistTaskExecutionState()
+			return
+		}
+		if (this.taskStateManager.syncTodos(todos)) {
+			await this.persistTaskExecutionState()
+		}
+	}
+	// kilocode_change end
 
 	// API Messages
 
@@ -2342,6 +2416,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.clineMessages = []
 		this.apiConversationHistory = []
 
+		// kilocode_change: initialize compact execution state before expensive context preparation.
+		await this.initializeTaskExecutionState(task)
+
 		// The todo list is already set in the constructor if initialTodos were provided
 		// No need to add any messages - the todoList property is already set
 
@@ -2428,6 +2505,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		await this.overwriteClineMessages(modifiedClineMessages)
 		this.clineMessages = await this.getSavedClineMessages()
+		// kilocode_change: state is loaded after todo restoration, but before any resumed API request.
+		await this.loadTaskExecutionState()
 
 		// Now present the cline messages to the user and ask if they want to
 		// resume (NOTE: we ran into a bug before where the
