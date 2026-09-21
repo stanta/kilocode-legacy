@@ -17,7 +17,7 @@ import { processUserContentMentions } from "../../mentions/processUserContentMen
 import { MultiSearchReplaceDiffStrategy } from "../../diff/strategies/multi-search-replace"
 import { MultiFileSearchReplaceDiffStrategy } from "../../diff/strategies/multi-file-search-replace"
 import { EXPERIMENT_IDS } from "../../../shared/experiments"
-import { readApiMessages } from "../../task-persistence"
+import { readApiMessages, saveApiMessages } from "../../task-persistence"
 
 const hoistedTaskPersistenceMocks = vi.hoisted(() => ({
 	readApiMessages: vi.fn().mockResolvedValue([]),
@@ -458,6 +458,35 @@ describe("Cline", () => {
 			}).toThrow("Either historyItem or task/images must be provided")
 		})
 	})
+
+	// kilocode_change start
+	describe("new task persistence", () => {
+		it("creates the API history file before starting expensive request preparation", async () => {
+			const task = new Task({
+				provider: mockProvider,
+				apiConfiguration: mockApiConfig,
+				task: "test task",
+				startTask: false,
+				context: mockExtensionContext,
+			})
+			const initiateTaskLoop = vi
+				.spyOn(task as any, "initiateTaskLoop")
+				.mockRejectedValue(new Error("stop before context preparation"))
+
+			await expect((task as any).startTask("test task")).rejects.toThrow("stop before context preparation")
+
+			expect(saveApiMessages).toHaveBeenCalledWith({
+				messages: [],
+				taskId: task.taskId,
+				globalStoragePath: mockExtensionContext.globalStorageUri.fsPath,
+				workspaceRoot: task.cwd,
+			})
+			expect(vi.mocked(saveApiMessages).mock.invocationCallOrder[0]).toBeLessThan(
+				initiateTaskLoop.mock.invocationCallOrder[0],
+			)
+		})
+	})
+	// kilocode_change end
 
 	describe("getEnvironmentDetails", () => {
 		describe("API conversation handling", () => {
