@@ -198,11 +198,11 @@ describe("webviewMessageHandler - image mentions", () => {
 	})
 
 	it("should resolve image mentions for askResponse payloads", async () => {
-		const mockHandleWebviewAskResponse = vi.fn()
+		const mockHandleUserWebviewAskResponse = vi.fn()
 		vi.mocked(mockClineProvider.getCurrentTask).mockReturnValue({
 			cwd: "/mock/workspace",
 			rooIgnoreController: undefined,
-			handleWebviewAskResponse: mockHandleWebviewAskResponse,
+			handleUserWebviewAskResponse: mockHandleUserWebviewAskResponse,
 		} as any)
 
 		await webviewMessageHandler(mockClineProvider, {
@@ -213,7 +213,7 @@ describe("webviewMessageHandler - image mentions", () => {
 		})
 
 		expect(vi.mocked(resolveImageMentions)).toHaveBeenCalled()
-		expect(mockHandleWebviewAskResponse).toHaveBeenCalledWith("messageResponse", "See @/img.png", [
+		expect(mockHandleUserWebviewAskResponse).toHaveBeenCalledWith("messageResponse", "See @/img.png", [
 			"data:image/png;base64,from-mention",
 		])
 	})
