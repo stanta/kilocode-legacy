@@ -1500,4 +1500,174 @@ describe("Context Management", () => {
 			expect(result.newContextTokensAfterTruncation).toBeGreaterThan(0)
 		})
 	})
+
+	// kilocode_change start
+	// Phase 0 regressions: guard the condense / sliding-window behavior that the
+	// task-state integration (U1-U3) will build on.
+	describe("Context Management Phase 0 regressions", () => {
+		beforeEach(() => {
+			if (!TelemetryService.hasInstance()) {
+				TelemetryService.createInstance([])
+			}
+		})
+
+		describe("truncateConversation with already-truncated history", () => {
+			it("only counts visible messages when truncating again (non-destructive hiding)", () => {
+				// First truncation on a fresh history of 5 messages removes 2
+				const initial: ApiMessage[] = [
+					{ role: "user", content: "m1" },
+					{ role: "assistant", content: "m2" },
+					{ role: "user", content: "m3" },
+					{ role: "assistant", content: "m4" },
+					{ role: "user", content: "m5" },
+				]
+				const first = truncateConversation(initial, 0.5, taskId)
+				expect(first.messagesRemoved).toBe(2)
+
+				// Second truncation must only consider visible messages (3 visible:
+				// first + 2 kept), never re-tag hidden ones.
+				const second = truncateConversation(first.messages, 0.5, taskId)
+
+				// Visible messages before second truncation: first + 2 kept = 3;
+				// removing floor((3-1)*0.5)=1 -> rounded to 0, nothing removed.
+				expect(second.messagesRemoved).toBe(0)
+
+				// Hidden messages keep pointing at the ORIGINAL truncation id,
+				// not the new one.
+				const hidden = second.messages.filter((m) => m.truncationParent)
+				expect(hidden).toHaveLength(2)
+				for (const msg of hidden) {
+					expect(msg.truncationParent).toBe(first.truncationId)
+				}
+			})
+
+			it("does not mutate the input messages", () => {
+				const messages: ApiMessage[] = [
+					{ role: "user", content: "m1" },
+					{ role: "assistant", content: "m2" },
+					{ role: "user", content: "m3" },
+					{ role: "assistant", content: "m4" },
+					{ role: "user", content: "m5" },
+				]
+				const snapshot = JSON.parse(JSON.stringify(messages))
+
+				truncateConversation(messages, 0.5, taskId)
+
+				expect(messages).toEqual(snapshot)
+			})
+
+			it("always retains the first visible message and the last message", () => {
+				const messages: ApiMessage[] = [
+					{ role: "user", content: "m1" },
+					{ role: "assistant", content: "m2" },
+					{ role: "user", content: "m3" },
+					{ role: "assistant", content: "m4" },
+					{ role: "user", content: "m5" },
+					{ role: "assistant", content: "m6" },
+					{ role: "user", content: "m7" },
+				]
+
+				const result = truncateConversation(messages, 0.5, taskId)
+
+				const visible = result.messages.filter((m) => !m.truncationParent && !m.isTruncationMarker)
+				// 7 messages, 6 after first, 0.5 fraction -> floor(3) is odd, rounds to 2
+				expect(result.messagesRemoved).toBe(2)
+				expect(visible[0]?.content).toBe("m1")
+				expect(visible[visible.length - 1]?.content).toBe("m7")
+			})
+		})
+
+		describe("manageContext fallback and condense contracts", () => {
+			it("excludes already-hidden (truncationParent) messages from the post-truncation token recount", async () => {
+				const hidden: ApiMessage = { role: "assistant", content: "x".repeat(100), truncationParent: "t-old" }
+				const messages: ApiMessage[] = [
+					{ role: "user", content: "keep-1" },
+					hidden,
+					{ role: "user", content: "keep-2" },
+					{ role: "assistant", content: "keep-3" },
+					{ role: "user", content: "" },
+				]
+
+				// Force the truncation fallback path (condense disabled, over limit)
+				const result = await manageContext({
+					messages,
+					totalTokens: 70_001,
+					contextWindow: 100_000,
+					maxTokens: 30_000,
+					apiHandler: mockApiHandler,
+					autoCondenseContext: false,
+					autoCondenseContextPercent: 100,
+					systemPrompt: "System prompt",
+					taskId,
+					profileThresholds: {},
+					currentProfileId: "default",
+				})
+
+				expect(result.truncationId).toBeDefined()
+
+				// Recount manually: only visible messages + system prompt
+				const visibleAfter = result.messages.filter((m) => !m.truncationParent && !m.isTruncationMarker)
+				let expected = await estimateTokenCount([{ type: "text", text: "System prompt" }], mockApiHandler)
+				for (const msg of visibleAfter) {
+					expected += await estimateTokenCount(
+						[{ type: "text", text: msg.content as string }],
+						mockApiHandler,
+					)
+				}
+				expect(result.newContextTokensAfterTruncation).toBe(expected)
+
+				// The previously hidden message must not contribute: hidden content
+				// is 100 chars -> ~25 tokens; assert the recount is below that
+				// plus the visible content total.
+				const hiddenTokens = await estimateTokenCount([{ type: "text", text: "x".repeat(100) }], mockApiHandler)
+				expect(result.newContextTokensAfterTruncation).toBeLessThan(expected + hiddenTokens)
+			})
+
+			it("returns a successful condense result as-is with prevContextTokens (no truncation fallback)", async () => {
+				const condensedMessages: ApiMessage[] = [
+					{ role: "assistant", content: "summary of conversation", isSummary: true, condenseId: "cond-1" },
+					{ role: "user", content: "latest" },
+				]
+				const summarizeSpy = vi.spyOn(condenseModule, "summarizeConversation").mockResolvedValue({
+					messages: condensedMessages,
+					summary: "summary of conversation",
+					cost: 0.5,
+					newContextTokens: 42,
+					condenseId: "cond-1",
+				} as never)
+
+				const messages: ApiMessage[] = [
+					{ role: "user", content: "m1" },
+					{ role: "assistant", content: "m2" },
+					{ role: "user", content: "" },
+				]
+
+				const result = await manageContext({
+					messages,
+					totalTokens: 80_000,
+					contextWindow: 100_000,
+					maxTokens: 8_000,
+					apiHandler: mockApiHandler,
+					autoCondenseContext: true,
+					autoCondenseContextPercent: 50,
+					systemPrompt: "System prompt",
+					taskId,
+					profileThresholds: {},
+					currentProfileId: "default",
+				})
+
+				expect(summarizeSpy).toHaveBeenCalledTimes(1)
+				// The condensed result must be passed through untouched, with no
+				// sliding-window truncation applied on top.
+				expect(result.messages).toBe(condensedMessages)
+				expect(result.truncationId).toBeUndefined()
+				expect(result.messagesRemoved).toBeUndefined()
+				expect(result.summary).toBe("summary of conversation")
+				expect(result.prevContextTokens).toBeGreaterThan(0)
+
+				summarizeSpy.mockRestore()
+			})
+		})
+	})
+	// kilocode_change end
 })

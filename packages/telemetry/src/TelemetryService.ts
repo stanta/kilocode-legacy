@@ -148,6 +148,25 @@ export class TelemetryService {
 		this.captureEvent(TelemetryEventName.SLIDING_WINDOW_TRUNCATION, { taskId })
 	}
 
+	// kilocode_change start
+	/**
+	 * Captures the composition of a prompt by category (system prompt,
+	 * environment details, tool results, task state, other history).
+	 * Contains only counts/size estimates - never message content.
+	 */
+	public captureContextComposition(
+		taskId: string,
+		composition: {
+			messageCount: number
+			totalChars: number
+			totalEstTokens: number
+			categories: Record<string, { chars: number; estTokens: number }>
+		},
+	): void {
+		this.captureEvent(TelemetryEventName.CONTEXT_COMPOSITION_CAPTURED, { taskId, ...composition })
+	}
+	// kilocode_change end
+
 	public captureCodeActionUsed(actionType: string): void {
 		this.captureEvent(TelemetryEventName.CODE_ACTION_USED, { actionType })
 	}

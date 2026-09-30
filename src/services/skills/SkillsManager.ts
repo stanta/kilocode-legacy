@@ -19,6 +19,7 @@ export class SkillsManager {
 	private disposables: vscode.Disposable[] = []
 	private isDisposed = false
 	private configChangeNotifier: ConfigChangeNotifier // kilocode_change
+	private discoveryQueue: Promise<void> = Promise.resolve() // kilocode_change
 
 	constructor(provider: ClineProvider) {
 		this.providerRef = new WeakRef(provider)
@@ -38,6 +39,17 @@ export class SkillsManager {
 	 * - .kilocode/skills/[dirname] can be a symlink to a skill directory
 	 */
 	async discoverSkills(): Promise<void> {
+		// kilocode_change start: serialize rescans triggered by startup, file watchers, and user turns.
+		// Skills discovery clears and rebuilds the in-memory catalog, so overlapping scans could otherwise
+		// expose a partially rebuilt catalog to system prompt generation.
+		const discovery = this.discoveryQueue.then(() => this.performSkillsDiscovery())
+		this.discoveryQueue = discovery.catch(() => undefined)
+		return discovery
+		// kilocode_change end
+	}
+
+	// kilocode_change start
+	private async performSkillsDiscovery(): Promise<void> {
 		this.skills.clear()
 		const skillsDirs = await this.getSkillsDirectories()
 
@@ -45,9 +57,10 @@ export class SkillsManager {
 			await this.scanSkillsDirectory(dir, source, mode)
 		}
 
-		const currentSkills = Array.from(this.skills.values()) // kilocode_change
-		await this.configChangeNotifier.notifyIfChanged("skill", currentSkills) // kilocode_change
+		const currentSkills = Array.from(this.skills.values())
+		await this.configChangeNotifier.notifyIfChanged("skill", currentSkills)
 	}
+	// kilocode_change end
 
 	/**
 	 * Scan a skills directory for skill subdirectories.

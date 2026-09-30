@@ -37,6 +37,8 @@ describe("experiments", () => {
 			const experiments: Record<ExperimentId, boolean> = {
 				morphFastApply: false, // kilocode_change
 				speechToText: false, // kilocode_change
+				contextCompositionInstrumentation: false, // kilocode_change
+				taskExecutionState: false, // kilocode_change
 				powerSteering: false,
 				multiFileApplyDiff: false,
 				preventFocusDisruption: false,
@@ -52,6 +54,8 @@ describe("experiments", () => {
 			const experiments: Record<ExperimentId, boolean> = {
 				morphFastApply: false, // kilocode_change
 				speechToText: false, // kilocode_change
+				contextCompositionInstrumentation: false, // kilocode_change
+				taskExecutionState: false, // kilocode_change
 				powerSteering: true,
 				multiFileApplyDiff: false,
 				preventFocusDisruption: false,
@@ -67,6 +71,8 @@ describe("experiments", () => {
 			const experiments: Record<ExperimentId, boolean> = {
 				morphFastApply: false, // kilocode_change
 				speechToText: false, // kilocode_change
+				contextCompositionInstrumentation: false, // kilocode_change
+				taskExecutionState: false, // kilocode_change
 				powerSteering: false,
 				multiFileApplyDiff: false,
 				preventFocusDisruption: false,

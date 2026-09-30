@@ -54,18 +54,18 @@ describe("webviewMessageHandler - image mentions (integration)", () => {
 		}
 	})
 
-	it("resolves image mentions for askResponse and passes images to handleWebviewAskResponse", async () => {
+	it("resolves image mentions for askResponse and passes images to handleUserWebviewAskResponse", async () => {
 		const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "roo-image-mentions-"))
 		try {
 			const imgBytes = Buffer.from("jpg-bytes")
 			await fs.writeFile(path.join(tmpRoot, "cat.jpg"), imgBytes)
 
-			const handleWebviewAskResponse = vi.fn()
+			const handleUserWebviewAskResponse = vi.fn()
 			const mockProvider = {
 				cwd: tmpRoot,
 				getCurrentTask: vi.fn().mockReturnValue({
 					cwd: tmpRoot,
-					handleWebviewAskResponse,
+					handleUserWebviewAskResponse,
 				}),
 				getState: vi.fn().mockResolvedValue({
 					maxImageFileSize: 5,
@@ -80,7 +80,7 @@ describe("webviewMessageHandler - image mentions (integration)", () => {
 				images: [],
 			} as any)
 
-			expect(handleWebviewAskResponse).toHaveBeenCalledWith("messageResponse", "Please look at @/cat.jpg", [
+			expect(handleUserWebviewAskResponse).toHaveBeenCalledWith("messageResponse", "Please look at @/cat.jpg", [
 				`data:image/jpeg;base64,${imgBytes.toString("base64")}`,
 			])
 		} finally {

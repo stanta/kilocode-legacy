@@ -122,11 +122,20 @@ import {
 	saveApiMessages,
 	readTaskMessages,
 	saveTaskMessages,
+	readTaskExecutionState,
+	saveTaskExecutionState,
 	taskMetadata,
 } from "../task-persistence"
 import { getTaskDirectoryPath } from "../../utils/storage"
 import { getEnvironmentDetails } from "../environment/getEnvironmentDetails"
-import { checkContextWindowExceededError } from "../context/context-management/context-error-handling"
+import { TaskStateManager } from "../task-state/TaskStateManager" // kilocode_change
+// kilocode_change start
+import { estimateContextComposition } from "../context-management/context-composition"
+import {
+	MAX_CONTEXT_WINDOW_RETRIES,
+	shouldAttemptContextWindowRecovery,
+} from "../context/context-management/context-window-recovery"
+// kilocode_change end
 import {
 	type CheckpointDiffOptions,
 	type CheckpointRestoreOptions,
@@ -168,7 +177,7 @@ import { deduplicateToolUseBlocks } from "./deduplicateToolUseBlocks"
 const MAX_EXPONENTIAL_BACKOFF_SECONDS = 600 // 10 minutes
 const DEFAULT_USAGE_COLLECTION_TIMEOUT_MS = 5000 // 5 seconds
 const FORCED_CONTEXT_REDUCTION_PERCENT = 75 // Keep 75% of context (remove 25%) on context window errors
-const MAX_CONTEXT_WINDOW_RETRIES = 3 // Maximum retries for context window errors
+// MAX_CONTEXT_WINDOW_RETRIES moved to context/context-management/context-window-recovery.ts (kilocode_change)
 // kilocode_change start
 const MAX_CHUTES_TERMINATED_RETRY_ATTEMPTS = 2 // Allow up to 2 retries (3 total attempts) before failing fast
 // kilocode_change end
@@ -214,6 +223,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	readonly metadata: TaskMetadata
 
 	todoList?: TodoItem[]
+	// kilocode_change start: bounded execution state used as the compact working-state projection
+	private taskExecutionStateEnabled: boolean
+	private taskStateManager?: TaskStateManager
+	// kilocode_change end
 
 	readonly rootTask: Task | undefined
 	readonly parentTask: Task | undefined
@@ -400,6 +413,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private askResponseImages?: string[]
 	public lastMessageTs?: number
 	private autoApprovalTimeoutRef?: NodeJS.Timeout
+	private pendingSkillsRefresh: Promise<void> = Promise.resolve() // kilocode_change
 
 	// Tool Use
 	consecutiveMistakeCount: number = 0
@@ -516,6 +530,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}: TaskOptions) {
 		super()
 		this.context = context // kilocode_change
+		// kilocode_change: fix the experiment variant for this Task instance so semantics do not flip mid-session.
+		this.taskExecutionStateEnabled = experiments.isEnabled(
+			experimentsConfig ?? {},
+			EXPERIMENT_IDS.TASK_EXECUTION_STATE,
+		)
 
 		if (startTask && !task && !images && !historyItem) {
 			throw new Error("Either historyItem or task/images must be provided")
@@ -1283,6 +1302,80 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		return [instance, promise]
 	}
 
+	// kilocode_change start: U1 task execution state lifecycle
+	private async persistTaskExecutionState(): Promise<void> {
+		if (!this.taskExecutionStateEnabled || !this.taskStateManager) return
+		try {
+			await saveTaskExecutionState({
+				state: this.taskStateManager.getSnapshot(),
+				taskId: this.taskId,
+				globalStoragePath: this.globalStoragePath,
+				workspaceRoot: this.cwd,
+			})
+		} catch (error) {
+			// State is an optimization layer. Persistence failure must never stop the task.
+			console.warn(`[Task#${this.taskId}] Failed to persist task execution state:`, error)
+		}
+	}
+
+	private async initializeTaskExecutionState(originalGoal?: string): Promise<void> {
+		if (!this.taskExecutionStateEnabled) return
+		this.taskStateManager = TaskStateManager.create(originalGoal ?? this.metadata.task ?? "", this.todoList ?? [])
+		await this.persistTaskExecutionState()
+	}
+
+	private async loadTaskExecutionState(): Promise<void> {
+		try {
+			const persisted = await readTaskExecutionState({
+				taskId: this.taskId,
+				globalStoragePath: this.globalStoragePath,
+				workspaceRoot: this.cwd,
+			})
+
+			// Presence of persisted state is the session-level experiment lock.
+			// Legacy sessions without the file remain legacy even if the global flag
+			// is later enabled; flagged sessions remain enabled after restart.
+			if (!persisted) {
+				this.taskExecutionStateEnabled = false
+				this.taskStateManager = undefined
+				return
+			}
+
+			const manager = TaskStateManager.fromUnknown(persisted)
+			if (!manager) {
+				this.taskExecutionStateEnabled = false
+				this.taskStateManager = undefined
+				return
+			}
+			this.taskExecutionStateEnabled = true
+			this.taskStateManager = manager
+		} catch (error) {
+			// Corrupt/unreadable state degrades to legacy behavior rather than
+			// reconstructing semantic state from historical conversation text.
+			console.warn(`[Task#${this.taskId}] Failed to load task execution state; using legacy context:`, error)
+			this.taskExecutionStateEnabled = false
+			this.taskStateManager = undefined
+		}
+	}
+
+	public getTaskExecutionStateBlock(): string {
+		if (!this.taskExecutionStateEnabled || !this.taskStateManager) return ""
+		return this.taskStateManager.render()
+	}
+
+	public async syncTaskExecutionStateTodos(todos: TodoItem[]): Promise<void> {
+		if (!this.taskExecutionStateEnabled) return
+		if (!this.taskStateManager) {
+			this.taskStateManager = TaskStateManager.create(this.metadata.task ?? "", todos)
+			await this.persistTaskExecutionState()
+			return
+		}
+		if (this.taskStateManager.syncTodos(todos)) {
+			await this.persistTaskExecutionState()
+		}
+	}
+	// kilocode_change end
+
 	// API Messages
 
 	private async getSavedApiConversationHistory(): Promise<ApiMessage[]> {
@@ -1870,11 +1963,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				) {
 					// For tool approvals, we need to approve first, then send
 					// the message if there's text/images.
-					this.handleWebviewAskResponse("yesButtonClicked", message.text, message.images)
+					this.handleUserWebviewAskResponse("yesButtonClicked", message.text, message.images)
 				} else {
 					// For other ask types (like followup or command_output), fulfill the ask
 					// directly.
-					this.handleWebviewAskResponse("messageResponse", message.text, message.images)
+					this.handleUserWebviewAskResponse("messageResponse", message.text, message.images)
 				}
 			}
 		}
@@ -1900,9 +1993,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							type === "browser_action_launch" ||
 							type === "use_mcp_server"
 						) {
-							this.handleWebviewAskResponse("yesButtonClicked", message.text, message.images)
+							this.handleUserWebviewAskResponse("yesButtonClicked", message.text, message.images)
 						} else {
-							this.handleWebviewAskResponse("messageResponse", message.text, message.images)
+							this.handleUserWebviewAskResponse("messageResponse", message.text, message.images)
 						}
 					}
 				}
@@ -1938,6 +2031,42 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.emit(RooCodeEventName.TaskAskResponded)
 		return result
 	}
+
+	// kilocode_change start
+	private scheduleSkillsRefreshForUserInteraction(): void {
+		const provider = this.providerRef.deref()
+
+		if (!provider) {
+			return
+		}
+
+		const skillsManager = provider.getSkillsManager()
+		if (!skillsManager) {
+			return
+		}
+
+		this.pendingSkillsRefresh = skillsManager.discoverSkills().catch((error) => {
+			provider.log(
+				`[Task#${this.taskId}.${this.instanceId}] Failed to refresh skills for user interaction: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			)
+		})
+	}
+
+	private async waitForPendingSkillsRefresh(): Promise<void> {
+		await this.pendingSkillsRefresh
+	}
+	// kilocode_change end
+
+	// kilocode_change start
+	public handleUserWebviewAskResponse(askResponse: ClineAskResponse, text?: string, images?: string[]) {
+		// A manual user choice can redirect the next execution step even when it carries no text
+		// (yes/no buttons, suggested answers, structured selections, retry).
+		this.scheduleSkillsRefreshForUserInteraction()
+		this.handleWebviewAskResponse(askResponse, text, images)
+	}
+	// kilocode_change end
 
 	handleWebviewAskResponse(askResponse: ClineAskResponse, text?: string, images?: string[]) {
 		// Clear any pending auto-approval timeout when user responds
@@ -2336,6 +2465,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.clineMessages = []
 		this.apiConversationHistory = []
 
+		// kilocode_change: initialize compact execution state before expensive context preparation.
+		await this.initializeTaskExecutionState(task)
+
 		// The todo list is already set in the constructor if initialTodos were provided
 		// No need to add any messages - the todoList property is already set
 
@@ -2346,6 +2478,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// If the extension host is terminated while collecting mentions/environment details,
 		// the task remains resumable instead of becoming an indexed task with no API history file.
 		await this.saveApiConversationHistory()
+		// kilocode_change end
+		// kilocode_change start: refresh skills after the initial user interaction and before the first model request.
+		// Keep this after the early history save so a slow filesystem scan cannot make a new task non-resumable.
+		this.scheduleSkillsRefreshForUserInteraction()
+		await this.waitForPendingSkillsRefresh()
 		// kilocode_change end
 		this.isInitialized = true
 
@@ -2422,6 +2559,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		await this.overwriteClineMessages(modifiedClineMessages)
 		this.clineMessages = await this.getSavedClineMessages()
+		// kilocode_change: state is loaded after todo restoration, but before any resumed API request.
+		await this.loadTaskExecutionState()
 
 		// Now present the cline messages to the user and ask if they want to
 		// resume (NOTE: we ran into a bug before where the
@@ -4446,6 +4585,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	// kilocode_change end
 
 	/*private kilocode_change*/ async getSystemPrompt(): Promise<string> {
+		// kilocode_change start: a user message may arrive while the agent is streaming or queued.
+		// Ensure the next system prompt sees the fully refreshed skill catalog before applicability is evaluated.
+		await this.waitForPendingSkillsRefresh()
+		// kilocode_change end
 		const { mcpEnabled } = (await this.providerRef.deref()?.getState()) ?? {}
 		let mcpHub: McpHub | undefined
 		if (mcpEnabled ?? true) {
@@ -4721,10 +4864,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}
 	// kilocode_change end
 
+	// kilocode_change start
 	public async *attemptApiRequest(
 		retryAttempt: number = 0,
-		options: { skipProviderRateLimit?: boolean } = {},
+		options: {
+			skipProviderRateLimit?: boolean
+			/** Number of context-window overflow recovery attempts already made for this request chain. */
+			contextWindowRetryAttempt?: number
+		} = {},
 	): ApiStream {
+		// kilocode_change end
 		const state = await this.providerRef.deref()?.getState()
 		const apiConfiguration = this.getSessionApiConfiguration()
 		const condensingSettings = await this.ensureSessionCondensingSettings()
@@ -5060,6 +5209,27 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Reset the flag after using it
 		this.skipPrevResponseIdOnce = false
 
+		// kilocode_change start
+		// Phase 0 context composition instrumentation: measure what the request
+		// payload is composed of (system prompt / environment details / tool
+		// results / task state / other history) and report it. Read-only - the
+		// payload below is never modified. Off by default; when the experiment
+		// flag is disabled this block is skipped entirely and behavior is
+		// identical to before.
+		if (experiments.isEnabled(state?.experiments ?? {}, EXPERIMENT_IDS.CONTEXT_COMPOSITION_INSTRUMENTATION)) {
+			try {
+				const composition = estimateContextComposition({
+					systemPrompt,
+					messages: cleanConversationHistory as ApiMessage[],
+				})
+				TelemetryService.instance.captureContextComposition(this.taskId, composition)
+			} catch (instrumentationError) {
+				// Instrumentation must never break the request.
+				console.warn(`[Task#${this.taskId}] Context composition instrumentation failed:`, instrumentationError)
+			}
+		}
+		// kilocode_change end
+
 		// The provider accepts reasoning items alongside standard messages; cast to the expected parameter type.
 		const stream = this.api.createMessage(
 			systemPrompt,
@@ -5152,7 +5322,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				const { response } = askResponse
 
 				this.currentRequestAbortController = undefined
-				const isContextWindowExceededError = checkContextWindowExceededError(error)
+				// kilocode_change: removed unused isContextWindowExceededError local;
+				// context-window overflow recovery is now handled generically in
+				// the shared first-chunk error path below.
 
 				if (response === "retry_clicked") {
 					yield* this.attemptApiRequest(retryAttempt + 1)
@@ -5170,6 +5342,47 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// outer request loop, which applies a bounded retry cap.
 			if (this.isChutesTerminatedError(error)) {
 				throw error
+			}
+			// kilocode_change end
+			// kilocode_change start
+			// Context-window overflow recovery: when the provider rejects the
+			// request because the prompt exceeds the model's context window,
+			// force a context reduction (condense with sliding-window fallback)
+			// and retry the request instead of immediately surfacing a failure.
+			// Bounded by MAX_CONTEXT_WINDOW_RETRIES so a conversation that keeps
+			// overflowing degrades to the generic error handling below rather
+			// than retrying forever. Non-context errors take the same paths as
+			// before.
+			const contextWindowRetryAttempt = options.contextWindowRetryAttempt ?? 0
+			if (shouldAttemptContextWindowRecovery(error, contextWindowRetryAttempt)) {
+				if (this.abort) {
+					throw new Error(
+						`[Task#attemptApiRequest] task ${this.taskId}.${this.instanceId} aborted during context window recovery`,
+					)
+				}
+				console.warn(
+					`[Task#attemptApiRequest] Context window exceeded (recovery attempt ${contextWindowRetryAttempt + 1}/${MAX_CONTEXT_WINDOW_RETRIES}); forcing context reduction and retrying.`,
+				)
+				let recoverySucceeded = false
+				try {
+					await this.handleContextWindowExceededError()
+					recoverySucceeded = true
+				} catch (recoveryError) {
+					// Recovery itself failed (e.g. condensing error); log and
+					// fall through to the generic error handling below so the
+					// user can still decide what to do.
+					console.error(
+						`[Task#attemptApiRequest] Context window recovery failed (attempt ${contextWindowRetryAttempt + 1}/${MAX_CONTEXT_WINDOW_RETRIES}):`,
+						recoveryError,
+					)
+				}
+				if (recoverySucceeded) {
+					yield* this.attemptApiRequest(retryAttempt + 1, {
+						...options,
+						contextWindowRetryAttempt: contextWindowRetryAttempt + 1,
+					})
+					return
+				}
 			}
 			// kilocode_change end
 			// note that this api_req_failed ask is unique in that we only present this option if the api hasn't streamed any content yet (ie it fails on the first chunk due), as it would allow them to hit a retry button. However if the api failed mid-stream, it could be in any arbitrary state where some tools may have executed, so that error is handled differently and requires cancelling the task entirely.

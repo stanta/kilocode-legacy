@@ -25,6 +25,7 @@ export * from "./model.js"
 export * from "./profile-type.js" // kilocode_change
 export * from "./provider-settings.js"
 export * from "./task.js"
+export * from "./task-execution-state.js" // kilocode_change
 export * from "./todo.js"
 export * from "./telemetry.js"
 export * from "./terminal.js"
