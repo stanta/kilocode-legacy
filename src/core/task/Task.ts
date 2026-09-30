@@ -2373,14 +2373,15 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		await this.providerRef.deref()?.postStateToWebview()
 
 		await this.say("text", task, images)
-		// kilocode_change start: refresh skills after the initial user message and before the first model request.
-		this.scheduleSkillsRefreshForUserMessage()
-		await this.waitForPendingSkillsRefresh()
-		// kilocode_change end
 		// kilocode_change start: create both task history files before expensive context preparation.
 		// If the extension host is terminated while collecting mentions/environment details,
 		// the task remains resumable instead of becoming an indexed task with no API history file.
 		await this.saveApiConversationHistory()
+		// kilocode_change end
+		// kilocode_change start: refresh skills after the initial user message and before the first model request.
+		// Keep this after the early history save so a slow filesystem scan cannot make a new task non-resumable.
+		this.scheduleSkillsRefreshForUserMessage()
+		await this.waitForPendingSkillsRefresh()
 		// kilocode_change end
 		this.isInitialized = true
 
