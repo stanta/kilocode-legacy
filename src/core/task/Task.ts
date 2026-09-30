@@ -400,6 +400,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private askResponseImages?: string[]
 	public lastMessageTs?: number
 	private autoApprovalTimeoutRef?: NodeJS.Timeout
+	private pendingSkillsRefresh: Promise<void> = Promise.resolve() // kilocode_change
 
 	// Tool Use
 	consecutiveMistakeCount: number = 0
@@ -1939,9 +1940,39 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		return result
 	}
 
+	// kilocode_change start
+	private scheduleSkillsRefreshForUserMessage(): void {
+		const provider = this.providerRef.deref()
+		const skillsManager = provider?.getSkillsManager()
+
+		if (!skillsManager) {
+			return
+		}
+
+		this.pendingSkillsRefresh = skillsManager.discoverSkills().catch((error) => {
+			provider.log(
+				`[Task#${this.taskId}.${this.instanceId}] Failed to refresh skills for user message: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			)
+		})
+	}
+
+	private async waitForPendingSkillsRefresh(): Promise<void> {
+		await this.pendingSkillsRefresh
+	}
+	// kilocode_change end
+
 	handleWebviewAskResponse(askResponse: ClineAskResponse, text?: string, images?: string[]) {
 		// Clear any pending auto-approval timeout when user responds
 		this.cancelAutoApprovalTimeout()
+
+		// kilocode_change start: refresh the skill catalog for every user-authored message before the next prompt.
+		const hasUserMessageContent = Boolean(text?.trim()) || Boolean(images?.length)
+		if (askResponse === "messageResponse" || hasUserMessageContent) {
+			this.scheduleSkillsRefreshForUserMessage()
+		}
+		// kilocode_change end
 
 		// this.askResponse = askResponse kilocode_change
 		this.askResponseText = text
@@ -2342,6 +2373,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		await this.providerRef.deref()?.postStateToWebview()
 
 		await this.say("text", task, images)
+		// kilocode_change start: refresh skills after the initial user message and before the first model request.
+		this.scheduleSkillsRefreshForUserMessage()
+		await this.waitForPendingSkillsRefresh()
+		// kilocode_change end
 		// kilocode_change start: create both task history files before expensive context preparation.
 		// If the extension host is terminated while collecting mentions/environment details,
 		// the task remains resumable instead of becoming an indexed task with no API history file.
@@ -4446,6 +4481,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	// kilocode_change end
 
 	/*private kilocode_change*/ async getSystemPrompt(): Promise<string> {
+		// kilocode_change start: a user message may arrive while the agent is streaming or queued.
+		// Ensure the next system prompt sees the fully refreshed skill catalog before applicability is evaluated.
+		await this.waitForPendingSkillsRefresh()
+		// kilocode_change end
 		const { mcpEnabled } = (await this.providerRef.deref()?.getState()) ?? {}
 		let mcpHub: McpHub | undefined
 		if (mcpEnabled ?? true) {
