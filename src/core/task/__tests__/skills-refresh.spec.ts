@@ -31,7 +31,7 @@ describe("Task skill refresh on user interactions", () => {
 	it("refreshes skills for a normal user message", async () => {
 		const { task, discoverSkills } = createBareTask()
 
-		task.handleWebviewAskResponse("messageResponse", "Use the latest skills")
+		task.handleUserWebviewAskResponse("messageResponse", "Use the latest skills")
 
 		await (task as any).waitForPendingSkillsRefresh()
 
@@ -41,7 +41,7 @@ describe("Task skill refresh on user interactions", () => {
 	it("refreshes skills when queued user content is attached to an approval response", async () => {
 		const { task, discoverSkills } = createBareTask()
 
-		task.handleWebviewAskResponse("yesButtonClicked", "Also check the new skill", undefined)
+		task.handleUserWebviewAskResponse("yesButtonClicked", "Also check the new skill", undefined)
 
 		await (task as any).waitForPendingSkillsRefresh()
 
@@ -51,7 +51,7 @@ describe("Task skill refresh on user interactions", () => {
 	it("refreshes skills for an approval selection without free-form text", async () => {
 		const { task, discoverSkills } = createBareTask()
 
-		task.handleWebviewAskResponse("yesButtonClicked")
+		task.handleUserWebviewAskResponse("yesButtonClicked")
 
 		await (task as any).waitForPendingSkillsRefresh()
 
@@ -61,7 +61,7 @@ describe("Task skill refresh on user interactions", () => {
 	it("refreshes skills for a rejection selection without free-form text", async () => {
 		const { task, discoverSkills } = createBareTask()
 
-		task.handleWebviewAskResponse("noButtonClicked")
+		task.handleUserWebviewAskResponse("noButtonClicked")
 
 		await (task as any).waitForPendingSkillsRefresh()
 
@@ -71,12 +71,21 @@ describe("Task skill refresh on user interactions", () => {
 	it("refreshes skills for structured and retry responses", async () => {
 		const { task, discoverSkills } = createBareTask()
 
-		task.handleWebviewAskResponse("objectResponse")
+		task.handleUserWebviewAskResponse("objectResponse")
 		await (task as any).waitForPendingSkillsRefresh()
-		task.handleWebviewAskResponse("retry_clicked")
+		task.handleUserWebviewAskResponse("retry_clicked")
 		await (task as any).waitForPendingSkillsRefresh()
 
 		expect(discoverSkills).toHaveBeenCalledTimes(2)
+	})
+
+	it("does not refresh skills for internal or auto-approved responses", async () => {
+		const { task, discoverSkills } = createBareTask()
+
+		task.handleWebviewAskResponse("yesButtonClicked")
+		await (task as any).waitForPendingSkillsRefresh()
+
+		expect(discoverSkills).not.toHaveBeenCalled()
 	})
 
 	it("waits for the initial user interaction skill refresh before starting the task loop", async () => {
