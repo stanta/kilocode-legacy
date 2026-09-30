@@ -1941,7 +1941,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}
 
 	// kilocode_change start
-	private scheduleSkillsRefreshForUserMessage(): void {
+	private scheduleSkillsRefreshForUserInteraction(): void {
 		const provider = this.providerRef.deref()
 		const skillsManager = provider?.getSkillsManager()
 
@@ -1951,7 +1951,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		this.pendingSkillsRefresh = skillsManager.discoverSkills().catch((error) => {
 			provider.log(
-				`[Task#${this.taskId}.${this.instanceId}] Failed to refresh skills for user message: ${
+				`[Task#${this.taskId}.${this.instanceId}] Failed to refresh skills for user interaction: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 			)
@@ -1967,11 +1967,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Clear any pending auto-approval timeout when user responds
 		this.cancelAutoApprovalTimeout()
 
-		// kilocode_change start: refresh the skill catalog for every user-authored message before the next prompt.
-		const hasUserMessageContent = Boolean(text?.trim()) || Boolean(images?.length)
-		if (askResponse === "messageResponse" || hasUserMessageContent) {
-			this.scheduleSkillsRefreshForUserMessage()
-		}
+		// kilocode_change start: every user-facing response can change the next execution path.
+		// Refresh even for button/suggested-answer selections with no free-form text so the next
+		// system prompt evaluates skills against the newly selected branch of the conversation.
+		this.scheduleSkillsRefreshForUserInteraction()
 		// kilocode_change end
 
 		// this.askResponse = askResponse kilocode_change
@@ -2378,9 +2377,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// the task remains resumable instead of becoming an indexed task with no API history file.
 		await this.saveApiConversationHistory()
 		// kilocode_change end
-		// kilocode_change start: refresh skills after the initial user message and before the first model request.
+		// kilocode_change start: refresh skills after the initial user interaction and before the first model request.
 		// Keep this after the early history save so a slow filesystem scan cannot make a new task non-resumable.
-		this.scheduleSkillsRefreshForUserMessage()
+		this.scheduleSkillsRefreshForUserInteraction()
 		await this.waitForPendingSkillsRefresh()
 		// kilocode_change end
 		this.isInitialized = true
