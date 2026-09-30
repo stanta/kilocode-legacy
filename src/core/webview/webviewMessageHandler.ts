@@ -652,7 +652,7 @@ export const webviewMessageHandler = async (
 				const resolved = await resolveIncomingImages({ text: message.text, images: message.images })
 				provider
 					.getCurrentTask()
-					?.handleWebviewAskResponse(message.askResponse!, resolved.text, resolved.images)
+					?.handleUserWebviewAskResponse(message.askResponse!, resolved.text, resolved.images) // kilocode_change
 			}
 			break
 
