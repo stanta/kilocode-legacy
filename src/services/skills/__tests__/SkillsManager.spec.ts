@@ -97,6 +97,32 @@ describe("SkillsManager", () => {
 	})
 
 	describe("discoverSkills", () => {
+		// kilocode_change start
+		it("serializes concurrent skill discovery runs", async () => {
+			let releaseFirst: (() => void) | undefined
+			const performDiscovery = vi
+				.spyOn(skillsManager as any, "performSkillsDiscovery")
+				.mockImplementationOnce(
+					() =>
+						new Promise<void>((resolve) => {
+							releaseFirst = resolve
+						}),
+				)
+				.mockResolvedValueOnce(undefined)
+
+			const first = skillsManager.discoverSkills()
+			const second = skillsManager.discoverSkills()
+
+			await Promise.resolve()
+			expect(performDiscovery).toHaveBeenCalledTimes(1)
+
+			releaseFirst?.()
+			await first
+			await second
+
+			expect(performDiscovery).toHaveBeenCalledTimes(2)
+		})
+		// kilocode_change end
 		it("should discover skills from global directory", async () => {
 			const pdfSkillDir = p(globalSkillsDir, "pdf-processing")
 			const pdfSkillMd = p(pdfSkillDir, "SKILL.md")
