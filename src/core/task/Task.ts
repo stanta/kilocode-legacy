@@ -1871,11 +1871,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				) {
 					// For tool approvals, we need to approve first, then send
 					// the message if there's text/images.
-					this.handleWebviewAskResponse("yesButtonClicked", message.text, message.images)
+					this.handleUserWebviewAskResponse("yesButtonClicked", message.text, message.images)
 				} else {
 					// For other ask types (like followup or command_output), fulfill the ask
 					// directly.
-					this.handleWebviewAskResponse("messageResponse", message.text, message.images)
+					this.handleUserWebviewAskResponse("messageResponse", message.text, message.images)
 				}
 			}
 		}
@@ -1901,9 +1901,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							type === "browser_action_launch" ||
 							type === "use_mcp_server"
 						) {
-							this.handleWebviewAskResponse("yesButtonClicked", message.text, message.images)
+							this.handleUserWebviewAskResponse("yesButtonClicked", message.text, message.images)
 						} else {
-							this.handleWebviewAskResponse("messageResponse", message.text, message.images)
+							this.handleUserWebviewAskResponse("messageResponse", message.text, message.images)
 						}
 					}
 				}
@@ -1963,15 +1963,18 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}
 	// kilocode_change end
 
+	// kilocode_change start
+	public handleUserWebviewAskResponse(askResponse: ClineAskResponse, text?: string, images?: string[]) {
+		// A manual user choice can redirect the next execution step even when it carries no text
+		// (yes/no buttons, suggested answers, structured selections, retry).
+		this.scheduleSkillsRefreshForUserInteraction()
+		this.handleWebviewAskResponse(askResponse, text, images)
+	}
+	// kilocode_change end
+
 	handleWebviewAskResponse(askResponse: ClineAskResponse, text?: string, images?: string[]) {
 		// Clear any pending auto-approval timeout when user responds
 		this.cancelAutoApprovalTimeout()
-
-		// kilocode_change start: every user-facing response can change the next execution path.
-		// Refresh even for button/suggested-answer selections with no free-form text so the next
-		// system prompt evaluates skills against the newly selected branch of the conversation.
-		this.scheduleSkillsRefreshForUserInteraction()
-		// kilocode_change end
 
 		// this.askResponse = askResponse kilocode_change
 		this.askResponseText = text
