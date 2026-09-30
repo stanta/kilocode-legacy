@@ -1,6 +1,6 @@
 import { Task } from "../Task"
 
-describe("Task skill refresh on user messages", () => {
+describe("Task skill refresh on user interactions", () => {
 	function createBareTask(discoverSkills = vi.fn().mockResolvedValue(undefined)) {
 		const provider = {
 			getSkillsManager: vi.fn(() => ({ discoverSkills })),
@@ -48,17 +48,38 @@ describe("Task skill refresh on user messages", () => {
 		expect(discoverSkills).toHaveBeenCalledTimes(1)
 	})
 
-	it("does not refresh skills for an approval click without user-authored content", async () => {
+	it("refreshes skills for an approval selection without free-form text", async () => {
 		const { task, discoverSkills } = createBareTask()
 
 		task.handleWebviewAskResponse("yesButtonClicked")
 
 		await (task as any).waitForPendingSkillsRefresh()
 
-		expect(discoverSkills).not.toHaveBeenCalled()
+		expect(discoverSkills).toHaveBeenCalledTimes(1)
 	})
 
-	it("waits for the initial user message skill refresh before starting the task loop", async () => {
+	it("refreshes skills for a rejection selection without free-form text", async () => {
+		const { task, discoverSkills } = createBareTask()
+
+		task.handleWebviewAskResponse("noButtonClicked")
+
+		await (task as any).waitForPendingSkillsRefresh()
+
+		expect(discoverSkills).toHaveBeenCalledTimes(1)
+	})
+
+	it("refreshes skills for structured and retry responses", async () => {
+		const { task, discoverSkills } = createBareTask()
+
+		task.handleWebviewAskResponse("objectResponse")
+		await (task as any).waitForPendingSkillsRefresh()
+		task.handleWebviewAskResponse("retry_clicked")
+		await (task as any).waitForPendingSkillsRefresh()
+
+		expect(discoverSkills).toHaveBeenCalledTimes(2)
+	})
+
+	it("waits for the initial user interaction skill refresh before starting the task loop", async () => {
 		let finishRefresh: (() => void) | undefined
 		const discoverSkills = vi.fn(
 			() =>
