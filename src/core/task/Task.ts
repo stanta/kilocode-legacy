@@ -2035,8 +2035,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	// kilocode_change start
 	private scheduleSkillsRefreshForUserInteraction(): void {
 		const provider = this.providerRef.deref()
-		const skillsManager = provider?.getSkillsManager()
 
+		if (!provider) {
+			return
+		}
+
+		const skillsManager = provider.getSkillsManager()
 		if (!skillsManager) {
 			return
 		}

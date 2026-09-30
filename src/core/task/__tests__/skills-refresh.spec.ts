@@ -87,6 +87,16 @@ describe("Task skill refresh on user interactions", () => {
 		expect(discoverSkills).not.toHaveBeenCalled()
 	})
 
+	it("does not schedule a refresh when the provider reference is unavailable", async () => {
+		const { task, discoverSkills } = createBareTask()
+		;(task as any).providerRef = { deref: () => undefined }
+
+		task.handleUserWebviewAskResponse("messageResponse", "Continue")
+		await (task as any).waitForPendingSkillsRefresh()
+
+		expect(discoverSkills).not.toHaveBeenCalled()
+	})
+
 	it("waits for the initial user interaction skill refresh before starting the task loop", async () => {
 		let finishRefresh: (() => void) | undefined
 		const discoverSkills = vi.fn(
