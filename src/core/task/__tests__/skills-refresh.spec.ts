@@ -20,7 +20,6 @@ describe("Task skill refresh on user interactions", () => {
 			abortReason: undefined,
 			abandoned: false,
 		})
-
 		;(task as any).cancelAutoApprovalTimeout = vi.fn()
 		;(task as any).checkpointSave = vi.fn().mockResolvedValue(undefined)
 		;(task as any).saveClineMessages = vi.fn().mockResolvedValue(undefined)
@@ -105,7 +104,7 @@ describe("Task skill refresh on user interactions", () => {
 
 		const startPromise = (task as any).startTask("Initial message", [])
 
-		await Promise.resolve()
+		await vi.waitFor(() => expect(discoverSkills).toHaveBeenCalledTimes(1))
 		expect(discoverSkills).toHaveBeenCalledTimes(1)
 		expect(initiateTaskLoop).not.toHaveBeenCalled()
 
