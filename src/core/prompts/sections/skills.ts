@@ -53,11 +53,18 @@ REQUIRED PRECONDITION
 
 Before producing ANY user-facing response, you MUST perform a skill applicability check.
 
-Step 1: Skill Evaluation
-- Evaluate the user's request against ALL available skill <description> entries in <available_skills>.
+Step 1: Reconstruct Current Intent
+- Treat the current user message, button click, suggested-answer selection, approval, rejection, retry, or other response as the newest decision in an ongoing conversation.
+- Inspect up to the 5 most recent preceding assistant/model messages in conversation history when they are available.
+- Use those messages only to resolve what the current user action refers to and what execution path it selects; the current user's action remains authoritative.
+- For terse or text-free responses (for example yes/no buttons or a selected suggestion), infer the intended next step from the immediately preceding assistant question/proposal and, when useful, the earlier messages within that 5-message window.
+
+Step 2: Skill Evaluation
+- Evaluate the reconstructed current intent and intended next step against ALL available skill <description> entries in <available_skills>.
+- Re-evaluate from scratch after every user interaction because a choice can change the required workflow or skills.
 - Determine whether at least one skill clearly and unambiguously applies.
 
-Step 2: Branching Decision
+Step 3: Branching Decision
 
 <if_skill_applies>
 - Select EXACTLY ONE skill.

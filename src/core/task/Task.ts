@@ -413,6 +413,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private askResponseImages?: string[]
 	public lastMessageTs?: number
 	private autoApprovalTimeoutRef?: NodeJS.Timeout
+	private pendingSkillsRefresh: Promise<void> = Promise.resolve() // kilocode_change
 
 	// Tool Use
 	consecutiveMistakeCount: number = 0
@@ -1962,11 +1963,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				) {
 					// For tool approvals, we need to approve first, then send
 					// the message if there's text/images.
-					this.handleWebviewAskResponse("yesButtonClicked", message.text, message.images)
+					this.handleUserWebviewAskResponse("yesButtonClicked", message.text, message.images)
 				} else {
 					// For other ask types (like followup or command_output), fulfill the ask
 					// directly.
-					this.handleWebviewAskResponse("messageResponse", message.text, message.images)
+					this.handleUserWebviewAskResponse("messageResponse", message.text, message.images)
 				}
 			}
 		}
@@ -1992,9 +1993,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							type === "browser_action_launch" ||
 							type === "use_mcp_server"
 						) {
-							this.handleWebviewAskResponse("yesButtonClicked", message.text, message.images)
+							this.handleUserWebviewAskResponse("yesButtonClicked", message.text, message.images)
 						} else {
-							this.handleWebviewAskResponse("messageResponse", message.text, message.images)
+							this.handleUserWebviewAskResponse("messageResponse", message.text, message.images)
 						}
 					}
 				}
@@ -2030,6 +2031,38 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		this.emit(RooCodeEventName.TaskAskResponded)
 		return result
 	}
+
+	// kilocode_change start
+	private scheduleSkillsRefreshForUserInteraction(): void {
+		const provider = this.providerRef.deref()
+		const skillsManager = provider?.getSkillsManager()
+
+		if (!skillsManager) {
+			return
+		}
+
+		this.pendingSkillsRefresh = skillsManager.discoverSkills().catch((error) => {
+			provider.log(
+				`[Task#${this.taskId}.${this.instanceId}] Failed to refresh skills for user interaction: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			)
+		})
+	}
+
+	private async waitForPendingSkillsRefresh(): Promise<void> {
+		await this.pendingSkillsRefresh
+	}
+	// kilocode_change end
+
+	// kilocode_change start
+	public handleUserWebviewAskResponse(askResponse: ClineAskResponse, text?: string, images?: string[]) {
+		// A manual user choice can redirect the next execution step even when it carries no text
+		// (yes/no buttons, suggested answers, structured selections, retry).
+		this.scheduleSkillsRefreshForUserInteraction()
+		this.handleWebviewAskResponse(askResponse, text, images)
+	}
+	// kilocode_change end
 
 	handleWebviewAskResponse(askResponse: ClineAskResponse, text?: string, images?: string[]) {
 		// Clear any pending auto-approval timeout when user responds
@@ -2441,6 +2474,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// If the extension host is terminated while collecting mentions/environment details,
 		// the task remains resumable instead of becoming an indexed task with no API history file.
 		await this.saveApiConversationHistory()
+		// kilocode_change end
+		// kilocode_change start: refresh skills after the initial user interaction and before the first model request.
+		// Keep this after the early history save so a slow filesystem scan cannot make a new task non-resumable.
+		this.scheduleSkillsRefreshForUserInteraction()
+		await this.waitForPendingSkillsRefresh()
 		// kilocode_change end
 		this.isInitialized = true
 
@@ -4543,6 +4581,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	// kilocode_change end
 
 	/*private kilocode_change*/ async getSystemPrompt(): Promise<string> {
+		// kilocode_change start: a user message may arrive while the agent is streaming or queued.
+		// Ensure the next system prompt sees the fully refreshed skill catalog before applicability is evaluated.
+		await this.waitForPendingSkillsRefresh()
+		// kilocode_change end
 		const { mcpEnabled } = (await this.providerRef.deref()?.getState()) ?? {}
 		let mcpHub: McpHub | undefined
 		if (mcpEnabled ?? true) {
