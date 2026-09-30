@@ -23,6 +23,9 @@ describe("getSkillsSection", () => {
 		expect(result).toContain("<description>Extracts text &amp; tables from PDFs</description>")
 		// For filesystem-based agents, location should be the absolute path to SKILL.md
 		expect(result).toContain("<location>/abs/path/pdf-processing/SKILL.md</location>")
+		expect(result).toContain("Inspect up to the 5 most recent preceding assistant/model messages")
+		expect(result).toContain("button click, suggested-answer selection, approval, rejection, retry")
+		expect(result).toContain("Re-evaluate from scratch after every user interaction")
 	})
 
 	it("should return empty string when skillsManager or currentMode is missing", async () => {
