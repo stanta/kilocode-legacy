@@ -2,4 +2,4 @@
 "kilo-code": patch
 ---
 
-Refresh available skills before responding to every new user message.
+Refresh available skills after every user interaction and use recent agent context when choosing the next skill.
