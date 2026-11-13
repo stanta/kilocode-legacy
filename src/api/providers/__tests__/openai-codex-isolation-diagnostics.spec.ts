@@ -1,5 +1,8 @@
 // kilocode_change - new file
 import type { ExtensionContext } from "vscode"
+import * as fs from "fs"
+import * as os from "os"
+import * as path from "path"
 
 import { OpenAiCodexHandler } from "../openai-codex"
 import {
@@ -13,6 +16,7 @@ import { NativeToolCallParser } from "../../../core/assistant-message/NativeTool
 // Diagnostic characterizations, not assertions that the observed failure modes are desirable.
 // All network and secret-storage operations use synthetic data.
 describe("Codex isolation diagnostics", () => {
+	const lockDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-lock-tests-"))
 	beforeEach(() => {
 		vi.spyOn(console, "info").mockImplementation(() => {})
 		vi.spyOn(console, "log").mockImplementation(() => {})
@@ -53,11 +57,11 @@ describe("Codex isolation diagnostics", () => {
 
 	function manager(secrets: ReturnType<typeof sharedStorage>) {
 		const instance = new OpenAiCodexOAuthManager()
-		instance.initialize({ secrets } as unknown as ExtensionContext, () => {})
+		instance.initialize({ secrets, globalStorageUri: { fsPath: lockDirectory, scheme: "file" } } as unknown as ExtensionContext, () => {})
 		return instance
 	}
 
-	it("reproduces a stale credential cache after another window updates shared storage", async () => {
+	it("observes changes to shared credentials despite a stale local cache", async () => {
 		const secrets = sharedStorage(credentials("old", Date.now() + 3_600_000))
 		const a = manager(secrets)
 		const b = manager(secrets)
@@ -66,11 +70,11 @@ describe("Codex isolation diagnostics", () => {
 
 		await a.saveCredentials(credentials("new", Date.now() + 3_600_000))
 
-		expect(await b.getAccessToken()).toBe("synthetic-access-old")
+		expect(await b.getAccessToken()).toBe("synthetic-access-new")
 		expect(JSON.parse((await secrets.get(OPENAI_CODEX_CREDENTIALS_KEY))!).access_token).toBe("synthetic-access-new")
 	})
 
-	it("reproduces two independent windows refreshing the same expired token concurrently", async () => {
+	it("serializes concurrent refreshes by independent managers", async () => {
 		const secrets = sharedStorage(credentials("old"))
 		const a = manager(secrets)
 		const b = manager(secrets)
@@ -85,7 +89,9 @@ describe("Codex isolation diagnostics", () => {
 
 		await Promise.all([a.getAccessToken(), b.getAccessToken()])
 
-		expect(submitted).toEqual(["synthetic-refresh-old", "synthetic-refresh-old"])
+		expect(submitted).toEqual(["synthetic-refresh-old"])
+		expect(await a.getAccessToken()).toBe("new-access")
+		expect(await b.getAccessToken()).toBe("new-access")
 	})
 
 	it("does not delete credentials refreshed by another window after invalid_grant", async () => {
@@ -100,7 +106,7 @@ describe("Codex isolation diagnostics", () => {
 			vi.fn(async () => Response.json({ error: "invalid_grant" }, { status: 400 })),
 		)
 
-		expect(await b.getAccessToken()).toBeNull()
+		expect(await b.getAccessToken()).toBe("synthetic-access-new")
 		expect(JSON.parse((await secrets.get(OPENAI_CODEX_CREDENTIALS_KEY))!).access_token).toBe("synthetic-access-new")
 		// A failed refresh must never delete another window's credentials.
 		expect(await a.getAccessToken()).toBe("synthetic-access-new")

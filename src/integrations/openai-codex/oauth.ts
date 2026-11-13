@@ -3,6 +3,7 @@ import * as http from "http"
 import { URL } from "url"
 import type { ExtensionContext } from "vscode"
 import { z } from "zod"
+import { withCodexOAuthLock } from "./oauth-refresh-lock"
 
 /**
  * OpenAI Codex OAuth Configuration
@@ -279,7 +280,10 @@ export async function exchangeCodeForTokens(code: string, codeVerifier: string):
  * Refreshes the access token using the refresh token
  * Uses application/x-www-form-urlencoded (not JSON)
  */
-export async function refreshAccessToken(credentials: OpenAiCodexCredentials): Promise<OpenAiCodexCredentials> {
+export async function refreshAccessToken(
+	credentials: OpenAiCodexCredentials,
+	lockSignal?: AbortSignal,
+): Promise<OpenAiCodexCredentials> {
 	const body = new URLSearchParams({
 		grant_type: "refresh_token",
 		client_id: OPENAI_CODEX_OAUTH_CONFIG.clientId,
@@ -292,17 +296,17 @@ export async function refreshAccessToken(credentials: OpenAiCodexCredentials): P
 			"Content-Type": "application/x-www-form-urlencoded",
 		},
 		body: body.toString(),
-		signal: AbortSignal.timeout(30000),
+		signal: lockSignal ? AbortSignal.any([lockSignal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000),
 	})
 
 	if (!response.ok) {
 		const errorText = await response.text()
-		const { errorCode, errorMessage } = parseOAuthErrorDetails(errorText)
-		const details = errorMessage ? errorMessage : errorText
-		throw new OpenAiCodexOAuthTokenError(
-			`Token refresh failed: ${response.status} ${response.statusText}${details ? ` - ${details}` : ""}`,
-			{ status: response.status, errorCode },
-		)
+		const { errorCode } = parseOAuthErrorDetails(errorText)
+		// Raw token endpoint bodies can contain secrets; never put them in errors or logs.
+		throw new OpenAiCodexOAuthTokenError("OpenAI Codex token refresh failed (HTTP " + response.status + ")", {
+			status: response.status,
+			errorCode,
+		})
 	}
 
 	const data = await response.json()
@@ -344,7 +348,10 @@ export class OpenAiCodexOAuthManager {
 	private context: ExtensionContext | null = null
 	private credentials: OpenAiCodexCredentials | null = null
 	private logFn: ((message: string) => void) | null = null
-	private refreshPromise: Promise<OpenAiCodexCredentials> | null = null
+	private refreshPromise: Promise<OpenAiCodexCredentials | null> | null = null
+	private secretSubscription?: { dispose(): void }
+	private cacheGeneration = 0
+	private authorizationGeneration = 0
 	private pendingAuth: {
 		codeVerifier: string
 		state: string
@@ -352,200 +359,161 @@ export class OpenAiCodexOAuthManager {
 	} | null = null
 
 	private log(message: string): void {
-		if (this.logFn) {
-			this.logFn(message)
-		} else {
-			console.log(message)
+		try {
+			;(this.logFn ?? console.log)(message)
+		} catch {
+			// Diagnostics must never interrupt a request.
 		}
 	}
 
-	private logError(message: string, error?: unknown): void {
-		const details = error instanceof Error ? error.message : error !== undefined ? String(error) : undefined
-		const full = details ? `${message} ${details}` : message
-		this.log(full)
-		console.error(full)
-	}
-
-	/**
-	 * Initialize the OAuth manager with VS Code extension context
-	 */
 	initialize(context: ExtensionContext, logFn?: (message: string) => void): void {
+		this.secretSubscription?.dispose()
 		this.context = context
 		this.logFn = logFn ?? null
+		this.credentials = null
+		this.cacheGeneration++
+		this.secretSubscription = context.secrets.onDidChange?.((event) => {
+			if (event.key === OPENAI_CODEX_CREDENTIALS_KEY) {
+				this.cacheGeneration++
+				this.credentials = null
+			}
+		})
 	}
 
-	/**
-	 * Force a refresh using the stored refresh token even if the access token is not expired.
-	 * Useful when the server invalidates an access token early.
-	 */
-	async forceRefreshAccessToken(): Promise<string | null> {
-		if (!this.credentials) {
-			await this.loadCredentials()
-		}
-
-		if (!this.credentials) {
-			return null
-		}
-
-		try {
-			// De-dupe concurrent refreshes
-			if (!this.refreshPromise) {
-				const prevRefreshToken = this.credentials.refresh_token
-				this.log(`[openai-codex-oauth] Forcing token refresh (expires=${this.credentials.expires})...`)
-				this.refreshPromise = refreshAccessToken(this.credentials).then((newCreds) => {
-					const rotated = newCreds.refresh_token !== prevRefreshToken
-					this.log(
-						`[openai-codex-oauth] Forced refresh response received (expires_in≈${Math.round(
-							(newCreds.expires - Date.now()) / 1000,
-						)}s, refresh_token_rotated=${rotated})`,
-					)
-					return newCreds
-				})
-			}
-
-			const newCredentials = await this.refreshPromise
-			this.refreshPromise = null
-			await this.saveCredentials(newCredentials)
-			this.log(`[openai-codex-oauth] Forced token persisted (expires=${newCredentials.expires})`)
-			return newCredentials.access_token
-		} catch (error) {
-			this.refreshPromise = null
-			this.logError("[openai-codex-oauth] Failed to force refresh token:", error)
-			if (error instanceof OpenAiCodexOAuthTokenError && error.isLikelyInvalidGrant()) {
-				this.log("[openai-codex-oauth] Refresh token rejected; explicit sign-in may be required")
-			}
-			return null
-		}
+	dispose(): void {
+		this.cancelAuthorizationFlow()
+		this.secretSubscription?.dispose()
+		this.secretSubscription = undefined
+		this.credentials = null
+		this.cacheGeneration++
+		this.context = null
 	}
 
-	/**
-	 * Load credentials from storage
-	 */
+	private requireContext(): ExtensionContext {
+		if (!this.context) throw new Error("OpenAI Codex OAuth manager not initialized")
+		return this.context
+	}
+
+	private async readStoredCredentials(): Promise<OpenAiCodexCredentials | null> {
+		const raw = await this.requireContext().secrets.get(OPENAI_CODEX_CREDENTIALS_KEY)
+		return raw ? openAiCodexCredentialsSchema.parse(JSON.parse(raw)) : null
+	}
+
+	private async writeUnlocked(credentials: OpenAiCodexCredentials): Promise<void> {
+		await this.requireContext().secrets.store(OPENAI_CODEX_CREDENTIALS_KEY, JSON.stringify(credentials))
+		this.credentials = credentials
+		this.cacheGeneration++
+	}
+
 	async loadCredentials(): Promise<OpenAiCodexCredentials | null> {
-		if (!this.context) {
-			return null
-		}
-
-		try {
-			const credentialsJson = await this.context.secrets.get(OPENAI_CODEX_CREDENTIALS_KEY)
-			if (!credentialsJson) {
+		if (!this.context) return null
+		for (let attempt = 0; attempt < 4; attempt++) {
+			const generation = this.cacheGeneration
+			try {
+				const current = await this.readStoredCredentials()
+				if (generation !== this.cacheGeneration) continue
+				this.credentials = current
+				return current
+			} catch {
+				if (generation !== this.cacheGeneration) continue
 				this.credentials = null
 				return null
 			}
-
-			const parsed = JSON.parse(credentialsJson)
-			this.credentials = openAiCodexCredentialsSchema.parse(parsed)
-			return this.credentials
-		} catch (error) {
-			this.credentials = null
-			this.logError("[openai-codex-oauth] Failed to load credentials:", error)
-			return null
 		}
-	}
-
-	/**
-	 * Save credentials to storage
-	 */
-	async saveCredentials(credentials: OpenAiCodexCredentials): Promise<void> {
-		if (!this.context) {
-			throw new Error("OAuth manager not initialized")
-		}
-
-		await this.context.secrets.store(OPENAI_CODEX_CREDENTIALS_KEY, JSON.stringify(credentials))
-		this.credentials = credentials
-	}
-
-	/**
-	 * Clear credentials from storage
-	 */
-	async clearCredentials(): Promise<void> {
-		if (!this.context) {
-			return
-		}
-
-		await this.context.secrets.delete(OPENAI_CODEX_CREDENTIALS_KEY)
+		// A concurrent login/logout invalidated all reads; fail closed.
 		this.credentials = null
+		return null
 	}
 
-	/**
-	 * Get a valid access token, refreshing if necessary
-	 */
+	async saveCredentials(credentials: OpenAiCodexCredentials): Promise<void> {
+		const validated = openAiCodexCredentialsSchema.parse(credentials)
+		await withCodexOAuthLock(this.requireContext(), async (lockSignal) => {
+			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
+			await this.writeUnlocked(validated)
+		})
+	}
+
+	async clearCredentials(): Promise<void> {
+		if (!this.context) return
+		this.authorizationGeneration++
+		this.cancelAuthorizationFlow()
+		await withCodexOAuthLock(this.requireContext(), async (lockSignal) => {
+			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
+			await this.requireContext().secrets.delete(OPENAI_CODEX_CREDENTIALS_KEY)
+			this.credentials = null
+			this.cacheGeneration++
+		})
+	}
+
+	private async runRefresh(rejectedAccessToken?: string): Promise<OpenAiCodexCredentials | null> {
+		// Local single-flight encompasses storage read, network refresh AND persistence.
+		if (!this.refreshPromise) {
+			const operation = withCodexOAuthLock(this.requireContext(), async (lockSignal) => {
+				// Another window may have refreshed or logged out while we waited.
+				const current = await this.readStoredCredentials()
+				if (!current) {
+					this.credentials = null
+					return null
+				}
+				if (rejectedAccessToken ? current.access_token !== rejectedAccessToken : !isTokenExpired(current)) {
+					this.credentials = current
+					return current
+				}
+				const refreshed = await refreshAccessToken(current, lockSignal)
+				if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
+				// Observe out-of-protocol writes (including older installed extension versions).
+				const latest = await this.readStoredCredentials()
+				if (!latest || JSON.stringify(latest) !== JSON.stringify(current)) {
+					this.credentials = latest
+					return latest
+				}
+				await this.writeUnlocked(refreshed)
+				if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
+				return refreshed
+			})
+			this.refreshPromise = operation
+			void operation.finally(() => {
+				if (this.refreshPromise === operation) this.refreshPromise = null
+			}).catch(() => {})
+		}
+		return this.refreshPromise
+	}
+
+	async getTokenSnapshot(): Promise<{ accessToken: string; accountId?: string } | null> {
+		const credentials = await this.loadCredentials()
+		if (!credentials) return null
+		const current = isTokenExpired(credentials) ? await this.runRefresh() : credentials
+		return current ? { accessToken: current.access_token, accountId: current.accountId } : null
+	}
+
+	async forceRefreshTokenSnapshot(
+		rejectedAccessToken: string,
+	): Promise<{ accessToken: string; accountId?: string } | null> {
+		const credentials = await this.runRefresh(rejectedAccessToken)
+		return credentials ? { accessToken: credentials.access_token, accountId: credentials.accountId } : null
+	}
+
+	// Compatibility with callers that only consume an access token.
 	async getAccessToken(): Promise<string | null> {
-		// Try to load credentials if not already loaded
-		if (!this.credentials) {
-			await this.loadCredentials()
-		}
-
-		if (!this.credentials) {
-			return null
-		}
-
-		// Check if token is expired and refresh if needed
-		if (isTokenExpired(this.credentials)) {
-			try {
-				// De-dupe concurrent refreshes
-				if (!this.refreshPromise) {
-					this.log(
-						`[openai-codex-oauth] Access token expired (expires=${this.credentials.expires}). Refreshing...`,
-					)
-					const prevRefreshToken = this.credentials.refresh_token
-					this.refreshPromise = refreshAccessToken(this.credentials).then((newCreds) => {
-						const rotated = newCreds.refresh_token !== prevRefreshToken
-						this.log(
-							`[openai-codex-oauth] Refresh response received (expires_in≈${Math.round(
-								(newCreds.expires - Date.now()) / 1000,
-							)}s, refresh_token_rotated=${rotated})`,
-						)
-						return newCreds
-					})
-				}
-
-				const newCredentials = await this.refreshPromise
-				this.refreshPromise = null
-				await this.saveCredentials(newCredentials)
-				this.log(`[openai-codex-oauth] Token persisted (expires=${newCredentials.expires})`)
-			} catch (error) {
-				this.refreshPromise = null
-				this.logError("[openai-codex-oauth] Failed to refresh token:", error)
-
-				// Only clear secrets when the refresh token is clearly invalid/revoked.
-				if (error instanceof OpenAiCodexOAuthTokenError && error.isLikelyInvalidGrant()) {
-					this.log("[openai-codex-oauth] Refresh token rejected; explicit sign-in may be required")
-				}
-				return null
-			}
-		}
-
-		return this.credentials.access_token
+		return (await this.getTokenSnapshot())?.accessToken ?? null
 	}
 
-	/**
-	 * Get the user's email from credentials
-	 */
-	async getEmail(): Promise<string | null> {
-		if (!this.credentials) {
-			await this.loadCredentials()
-		}
-		return this.credentials?.email || null
+	async forceRefreshAccessToken(): Promise<string | null> {
+		const current = await this.loadCredentials()
+		return current ? (await this.forceRefreshTokenSnapshot(current.access_token))?.accessToken ?? null : null
 	}
 
-	/**
-	 * Get the ChatGPT account ID from credentials
-	 * Used for the ChatGPT-Account-Id header required by the Codex API
-	 */
 	async getAccountId(): Promise<string | null> {
-		if (!this.credentials) {
-			await this.loadCredentials()
-		}
-		return this.credentials?.accountId || null
+		return (await this.loadCredentials())?.accountId ?? null
 	}
 
-	/**
-	 * Check if the user is authenticated
-	 */
+	async getEmail(): Promise<string | null> {
+		return (await this.loadCredentials())?.email ?? null
+	}
+
+	// Status checks must never rotate tokens or call the network.
 	async isAuthenticated(): Promise<boolean> {
-		const token = await this.getAccessToken()
-		return token !== null
+		return (await this.loadCredentials()) !== null
 	}
 
 	/**
@@ -560,6 +528,7 @@ export class OpenAiCodexOAuthManager {
 		const codeChallenge = generateCodeChallenge(codeVerifier)
 		const state = generateState()
 
+		this.authorizationGeneration++
 		this.pendingAuth = {
 			codeVerifier,
 			state,
@@ -587,6 +556,8 @@ export class OpenAiCodexOAuthManager {
 			this.pendingAuth.server = undefined
 		}
 
+		const pendingAuth = this.pendingAuth
+		const authGeneration = this.authorizationGeneration
 		return new Promise((resolve, reject) => {
 			const server = http.createServer(async (req, res) => {
 				try {
@@ -629,8 +600,10 @@ export class OpenAiCodexOAuthManager {
 					try {
 						// Note: state is validated above but not passed to exchangeCodeForTokens
 						// per the implementation guide (OpenAI rejects it)
-						const credentials = await exchangeCodeForTokens(code, this.pendingAuth.codeVerifier)
-
+						const credentials = await exchangeCodeForTokens(code, pendingAuth.codeVerifier)
+						if (this.pendingAuth !== pendingAuth || this.authorizationGeneration !== authGeneration) {
+							throw new Error("Authorization flow was cancelled or superseded")
+						}
 						await this.saveCredentials(credentials)
 
 						res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
@@ -672,7 +645,7 @@ export class OpenAiCodexOAuthManager {
 						resolve(credentials)
 					} catch (exchangeError) {
 						res.writeHead(500)
-						res.end(`Token exchange failed: ${exchangeError}`)
+						res.end("Token exchange failed")
 						reject(exchangeError)
 						server.close()
 					}
@@ -728,6 +701,7 @@ export class OpenAiCodexOAuthManager {
 			this.pendingAuth.server.close()
 		}
 		this.pendingAuth = null
+		this.authorizationGeneration++
 	}
 
 	/**
