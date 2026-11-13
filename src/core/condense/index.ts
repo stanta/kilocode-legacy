@@ -6,6 +6,7 @@ import { ModelInfo } from "@roo-code/types"
 
 import { t } from "../../i18n"
 import { ApiHandler } from "../../api"
+import { OpenAiCodexHandler } from "../../api/providers/openai-codex"
 import { ApiMessage } from "../task-persistence/apiMessages"
 import { maybeRemoveImageBlocks } from "../../api/transform/image-cleaning"
 import { findLast } from "../../shared/array"
@@ -244,6 +245,7 @@ export async function summarizeConversation(
 	customCondensingPrompt?: string,
 	condensingApiHandler?: ApiHandler,
 	useNativeTools?: boolean,
+	signal?: AbortSignal,
 ): Promise<SummarizeResponse> {
 	TelemetryService.instance.captureContextCondensed(
 		taskId,
@@ -344,7 +346,11 @@ export async function summarizeConversation(
 		}
 	}
 
-	const stream = handlerToUse.createMessage(promptToUse, requestMessages)
+	// Condensing is a separate network call: do not reuse the active Codex handler.
+	if (handlerToUse === apiHandler && handlerToUse instanceof OpenAiCodexHandler) {
+		handlerToUse = handlerToUse.fork()
+	}
+	const stream = handlerToUse.createMessage(promptToUse, requestMessages, undefined, { signal })
 
 	let summary = ""
 	let cost = 0

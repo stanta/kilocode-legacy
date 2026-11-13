@@ -10,7 +10,7 @@ describe("OpenAiCodexHandler tool history", () => {
 
 	beforeEach(() => {
 		handler = new OpenAiCodexHandler({ apiModelId: "gpt-6.1-sol" })
-		vi.spyOn(openAiCodexOAuthManager, "getAccessToken").mockResolvedValue("test-token")
+		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot").mockResolvedValue({ accessToken: "test-token" })
 		vi.spyOn(openAiCodexOAuthManager, "getAccountId").mockResolvedValue(null)
 		warn = vi.spyOn(console, "warn").mockImplementation(() => {})
 	})

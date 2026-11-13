@@ -9,7 +9,7 @@ import { ContextProxy } from "../../core/config/ContextProxy"
 import { ApiStream } from "../transform/stream"
 import pWaitFor from "p-wait-for"
 
-import type { ApiHandler, ApiHandlerCreateMessageMetadata } from "../index"
+import type { ApiHandler, ApiHandlerCreateMessageMetadata, ApiHandlerRequestOptions } from "../index"
 import { buildApiHandler } from "../index"
 import { virtualQuotaFallbackProfileDataSchema } from "../../../packages/types/src/provider-settings"
 import { OpenRouterHandler } from "./openrouter"
@@ -76,6 +76,7 @@ export class VirtualQuotaFallbackHandler extends EventEmitter implements ApiHand
 		systemPrompt: string,
 		messages: Anthropic.Messages.MessageParam[],
 		metadata?: ApiHandlerCreateMessageMetadata,
+		requestOptions?: ApiHandlerRequestOptions,
 	): ApiStream {
 		try {
 			await this.initialize()
@@ -87,7 +88,8 @@ export class VirtualQuotaFallbackHandler extends EventEmitter implements ApiHand
 
 			await this.usage.consume(this.activeProfileId, "requests", 1)
 
-			const stream = this.activeHandler.createMessage(systemPrompt, messages, metadata)
+			if (requestOptions?.signal?.aborted) throw new Error("Request cancelled")
+			const stream = this.activeHandler.createMessage(systemPrompt, messages, metadata, requestOptions)
 			let hasOutput = false
 			try {
 				for await (const chunk of stream) {
@@ -103,8 +105,8 @@ export class VirtualQuotaFallbackHandler extends EventEmitter implements ApiHand
 			} catch (error) {
 				// A dispatched request may already have executed tools or produced output.
 				// Never replay a partially observed response with another provider.
-				if (hasOutput) {
-					throw error
+				if (hasOutput || requestOptions?.signal?.aborted || (error as any)?.codexRequest) {
+					throw error // Codex retry is owned by Task, not this provider-switching wrapper.
 				}
 				// Check if this is a retryable error (rate limit or overload)
 				if (this.isRateLimitError(error) || this.isOverloadError(error)) {
@@ -115,7 +117,7 @@ export class VirtualQuotaFallbackHandler extends EventEmitter implements ApiHand
 					await this.adjustActiveHandler("Retryable Error")
 
 					// Retry the request with the new provider
-					yield* this.createMessage(systemPrompt, messages, metadata)
+					yield* this.createMessage(systemPrompt, messages, metadata, requestOptions)
 					return
 				}
 

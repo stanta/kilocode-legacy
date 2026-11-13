@@ -143,11 +143,18 @@ export interface ApiHandlerCreateMessageMetadata {
 	allowedFunctionNames?: string[]
 }
 
+/** Local request options. Never put these in IPC payload, metadata or conversation history. */
+export interface ApiHandlerRequestOptions {
+	signal?: AbortSignal
+	deadlineAt?: number
+}
+
 export interface ApiHandler {
 	createMessage(
 		systemPrompt: string,
 		messages: Anthropic.Messages.MessageParam[],
 		metadata?: ApiHandlerCreateMessageMetadata,
+		requestOptions?: ApiHandlerRequestOptions,
 	): ApiStream
 
 	getModel(): { id: string; info: ModelInfo }

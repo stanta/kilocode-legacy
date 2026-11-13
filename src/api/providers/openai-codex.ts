@@ -14,14 +14,14 @@ import {
 } from "@roo-code/types"
 import { TelemetryService } from "@roo-code/telemetry"
 
-import { Package } from "../../shared/package"
 import type { ApiHandlerOptions } from "../../shared/api"
 
 import { ApiStream, ApiStreamUsageChunk } from "../transform/stream"
 import { getModelParams } from "../transform/model-params"
 
 import { BaseProvider } from "./base-provider"
-import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata } from "../index"
+import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata, ApiHandlerRequestOptions } from "../index"
+import { getApiRequestTimeout } from "./utils/timeout-config"
 import { isMcpTool } from "../../utils/mcp-name"
 import { sanitizeOpenAiCallId } from "../../utils/tool-id"
 import { openAiCodexOAuthManager } from "../../integrations/openai-codex/oauth"
@@ -50,10 +50,61 @@ const CODEX_API_BASE_URL = "https://chatgpt.com/backend-api/codex"
  * - Limited model subset
  * - Custom headers for Codex backend
  */
+type CodexRequestState = {
+	eventsSeen: boolean
+	completed: boolean
+	responseId?: string
+	responseOutput?: any[]
+	pendingToolCallId?: string
+	pendingToolCallName?: string
+}
+
+class CodexRequestError extends Error {
+	readonly codexRequest = true
+	readonly safeToRetry: boolean
+	readonly code: "http" | "interrupted" | "cancelled" | "timeout" | "concurrent" | "auth"
+	readonly retryAfterMs?: number
+
+	constructor(
+		message: string,
+		code: CodexRequestError["code"],
+		readonly status?: number,
+		safeToRetry = false,
+		retryAfterMs?: number,
+	) {
+		super(message)
+		this.name = "CodexRequestError"
+		this.code = code
+		this.safeToRetry = safeToRetry
+		this.retryAfterMs = retryAfterMs
+	}
+}
+
+function codexAbortReason(signal: AbortSignal): Error {
+	return signal.reason instanceof Error ? signal.reason : new CodexRequestError("Codex request cancelled", "cancelled")
+}
+
+/** Awaiting a shared refresh may be cancelled without cancelling the refresh itself. */
+function awaitCodexAuth<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+	if (signal.aborted) return Promise.reject(codexAbortReason(signal))
+	return new Promise<T>((resolve, reject) => {
+		const finish = () => signal.removeEventListener("abort", cancel)
+		const cancel = () => { finish(); reject(codexAbortReason(signal)) }
+		signal.addEventListener("abort", cancel, { once: true })
+		operation.then(
+			(value) => { finish(); resolve(value) },
+			(error) => { finish(); reject(error) },
+		)
+	})
+}
+
 export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: implements SingleCompletionHandler */ {
 	protected options: ApiHandlerOptions
 	private readonly providerName = "OpenAI Codex"
 	private client?: OpenAI
+	private activeRequest = false
+	/** Transport is chosen before dispatch. Never switch after an SDK error. */
+	private useManualSse = false
 	// Complete response output array
 	private lastResponseOutput: any[] | undefined
 	// Last top-level response id
@@ -63,38 +114,17 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 	// Session ID for the Codex API (persists for the lifetime of the handler)
 	private readonly sessionId: string
 	private activeDiagnosticRequests = 0 // kilocode_change
-	/**
-	 * Some Codex/Responses streams emit tool-call argument deltas without stable call id/name.
-	 * Track the last observed tool identity from output_item events so we can still
-	 * emit `tool_call_partial` chunks (tool-call-only streams).
-	 */
-	private pendingToolCallId: string | undefined
-	private pendingToolCallName: string | undefined
-
-	// Event types handled by the shared event processor
-	private readonly coreHandledEventTypes = new Set<string>([
-		"response.text.delta",
-		"response.output_text.delta",
-		"response.reasoning.delta",
-		"response.reasoning_text.delta",
-		"response.reasoning_summary.delta",
-		"response.reasoning_summary_text.delta",
-		"response.refusal.delta",
-		"response.output_item.added",
-		"response.output_item.done",
-		"response.done",
-		"response.completed",
-		"response.tool_call_arguments.delta",
-		"response.function_call_arguments.delta",
-		"response.tool_call_arguments.done",
-		"response.function_call_arguments.done",
-	])
 
 	constructor(options: ApiHandlerOptions) {
 		super()
 		this.options = options
 		// Generate a new session ID for standalone handler usage (fallback)
 		this.sessionId = uuidv7()
+	}
+
+	/** Independent handler for condensing or other concurrent request. */
+	fork(): OpenAiCodexHandler {
+		return new OpenAiCodexHandler(this.options)
 	}
 
 	private normalizeUsage(usage: any, model: OpenAiCodexModel): ApiStreamUsageChunk | undefined {
@@ -139,8 +169,30 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		systemPrompt: string,
 		messages: Anthropic.Messages.MessageParam[],
 		metadata?: ApiHandlerCreateMessageMetadata,
+		requestOptions?: ApiHandlerRequestOptions,
 	): ApiStream {
+		if (this.activeRequest) {
+			throw new CodexRequestError("Codex handler is already processing a request", "concurrent")
+		}
 		const model = this.getModel()
+		this.activeRequest = true
+		this.lastResponseId = undefined
+		this.lastResponseOutput = undefined
+		const configuredTimeout = getApiRequestTimeout()
+		const timeoutMs = typeof configuredTimeout === "number" && Number.isFinite(configuredTimeout) && configuredTimeout > 0
+			? configuredTimeout : 600_000
+		const deadlineAt = typeof requestOptions?.deadlineAt === "number" && Number.isFinite(requestOptions.deadlineAt)
+			? requestOptions.deadlineAt : Date.now() + timeoutMs
+		const controller = new AbortController()
+		const onAbort = () => controller.abort(new CodexRequestError("Codex request cancelled", "cancelled"))
+		if (requestOptions?.signal?.aborted) onAbort()
+		else requestOptions?.signal?.addEventListener("abort", onAbort, { once: true })
+		const timer = setTimeout(
+			() => controller.abort(new CodexRequestError("Codex request deadline exceeded", "timeout")),
+			Math.max(0, deadlineAt - Date.now()),
+		)
+		timer.unref?.()
+		const requestState: CodexRequestState = { eventsSeen: false, completed: false }
 		// kilocode_change start: observe isolation and stalls without changing request behavior.
 		const requestId = uuidv7()
 		const started = Date.now()
@@ -149,7 +201,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		const diagnostic = (nextPhase: string, details: Record<string, number | boolean> = {}) => {
 			phase = nextPhase
 			// Do not log credentials, account identifiers, prompts, error bodies, or tool arguments.
-			console.info("[OpenAI Codex] Request diagnostic", {
+			try { console.info("[OpenAI Codex] Request diagnostic", {
 				pid: process.pid,
 				handlerId: this.sessionId,
 				requestId,
@@ -158,13 +210,20 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 				elapsedMs: Date.now() - started,
 				activeHandlerRequests: this.activeDiagnosticRequests,
 				...details,
-			})
+			}) } catch { /* diagnostic logging must not break a request */ }
 		}
 		diagnostic(phase)
 		const heartbeat = setInterval(() => diagnostic(phase, { waiting: true }), 30_000)
 		heartbeat.unref()
 		try {
-			yield* this.handleResponsesApiMessage(model, systemPrompt, messages, metadata, diagnostic)
+			if (controller.signal.aborted) throw codexAbortReason(controller.signal)
+			yield* this.handleResponsesApiMessage(model, systemPrompt, messages, requestState, controller.signal, deadlineAt, metadata, diagnostic)
+			if (!requestState.completed) {
+				throw new CodexRequestError("Codex stream closed without a completed response", "interrupted")
+			}
+			if (controller.signal.aborted) throw codexAbortReason(controller.signal)
+			this.lastResponseOutput = requestState.responseOutput
+			this.lastResponseId = requestState.responseId
 			diagnostic("request.completed")
 		} catch (error) {
 			diagnostic("request.error", {
@@ -172,8 +231,13 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 			})
 			throw error
 		} finally {
+			// On early consumer return: abort first, then allow iterator/reader cleanup.
+			if (!controller.signal.aborted) controller.abort()
+			clearTimeout(timer)
+			requestOptions?.signal?.removeEventListener("abort", onAbort)
 			clearInterval(heartbeat)
 			this.activeDiagnosticRequests--
+			this.activeRequest = false
 			diagnostic("request.closed")
 		}
 		// kilocode_change end
@@ -183,65 +247,36 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		model: OpenAiCodexModel,
 		systemPrompt: string,
 		messages: Anthropic.Messages.MessageParam[],
+		state: CodexRequestState,
+		signal: AbortSignal,
+		deadlineAt: number,
 		metadata?: ApiHandlerCreateMessageMetadata,
-		diagnostic?: (phase: string, details?: Record<string, number | boolean>) => void, // kilocode_change
+		diagnostic?: (phase: string, details?: Record<string, number | boolean>) => void,
 	): ApiStream {
-		// Reset state for this request
-		this.lastResponseOutput = undefined
-		this.lastResponseId = undefined
-		this.pendingToolCallId = undefined
-		this.pendingToolCallName = undefined
+		diagnostic?.("auth.start")
+		let snapshot = await awaitCodexAuth(openAiCodexOAuthManager.getTokenSnapshot(), signal)
+		diagnostic?.("auth.end", { authenticated: !!snapshot })
+		if (!snapshot) throw new CodexRequestError("Sign in to OpenAI Codex to continue", "auth")
+		const formattedInput = this.formatFullConversation(systemPrompt, messages, metadata?.taskId)
+		const body = this.buildRequestBody(model, formattedInput, systemPrompt, this.getReasoningEffort(model), metadata)
 
-		// Get access token from OAuth manager
-		diagnostic?.("auth.start") // kilocode_change
-		let accessToken = await openAiCodexOAuthManager.getAccessToken()
-		diagnostic?.("auth.end", { authenticated: !!accessToken }) // kilocode_change
-		if (!accessToken) {
-			throw new Error(
-				t("common:errors.openAiCodex.notAuthenticated", {
-					defaultValue:
-						"Not authenticated with OpenAI Codex. Please sign in using the OpenAI Codex OAuth flow.",
-				}),
-			)
-		}
-
-		// Resolve reasoning effort
-		const reasoningEffort = this.getReasoningEffort(model)
-
-		// Format conversation
-		const formattedInput = this.formatFullConversation(systemPrompt, messages, metadata?.taskId) // kilocode_change
-
-		// Build request body
-		// Per the implementation guide: Codex backend may reject some parameters
-		// Notably: max_output_tokens and prompt_cache_retention may be rejected
-		const requestBody = this.buildRequestBody(model, formattedInput, systemPrompt, reasoningEffort, metadata)
-
-		// Make the request with retry on auth failure
 		for (let attempt = 0; attempt < 2; attempt++) {
+			if (signal.aborted) throw codexAbortReason(signal)
 			try {
-				yield* this.executeRequest(requestBody, model, accessToken, metadata?.taskId, diagnostic) // kilocode_change
+				yield* this.executeRequest(body, model, snapshot, state, signal, deadlineAt, metadata?.taskId, diagnostic)
 				return
 			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error)
-				const isAuthFailure = /unauthorized|invalid token|not authenticated|authentication|401/i.test(message)
+				if (signal.aborted) throw codexAbortReason(signal)
+				if (!(error instanceof CodexRequestError) ||
+					error.status !== 401 || state.eventsSeen || attempt !== 0) throw error
 
-				if (attempt === 0 && isAuthFailure) {
-					// Force refresh the token for retry
-					diagnostic?.("auth.refresh.start") // kilocode_change
-					const refreshed = await openAiCodexOAuthManager.forceRefreshAccessToken()
-					diagnostic?.("auth.refresh.end", { authenticated: !!refreshed }) // kilocode_change
-					if (!refreshed) {
-						throw new Error(
-							t("common:errors.openAiCodex.notAuthenticated", {
-								defaultValue:
-									"Not authenticated with OpenAI Codex. Please sign in using the OpenAI Codex OAuth flow.",
-							}),
-						)
-					}
-					accessToken = refreshed
-					continue
-				}
-				throw error
+				diagnostic?.("auth.refresh.start")
+				snapshot = await awaitCodexAuth(
+					openAiCodexOAuthManager.forceRefreshTokenSnapshot(snapshot.accessToken),
+					signal,
+				)
+				diagnostic?.("auth.refresh.end", { authenticated: !!snapshot })
+				if (!snapshot) throw new CodexRequestError("Sign in to OpenAI Codex to continue", "auth", 401)
 			}
 		}
 	}
@@ -382,73 +417,67 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 	private async *executeRequest(
 		requestBody: any,
 		model: OpenAiCodexModel,
-		accessToken: string,
+		snapshot: { accessToken: string; accountId?: string },
+		state: CodexRequestState,
+		signal: AbortSignal,
+		deadlineAt: number,
 		taskId?: string,
-		diagnostic?: (phase: string, details?: Record<string, number | boolean>) => void, // kilocode_change
+		diagnostic?: (phase: string, details?: Record<string, number | boolean>) => void,
 	): ApiStream {
-		// Create AbortController for cancellation
-		this.abortController = new AbortController()
-		// kilocode_change start
-		let sdkEvents = 0
-		let sdkChunks = 0
-		// kilocode_change end
+		if (signal.aborted) throw codexAbortReason(signal)
+		const codexHeaders: Record<string, string> = {
+			originator: "kilo-code",
+			session_id: taskId || this.sessionId,
+			"User-Agent": DEFAULT_HEADERS["User-Agent"],
+			...(snapshot.accountId ? { "ChatGPT-Account-Id": snapshot.accountId } : {}),
+		}
+		if (this.useManualSse) {
+			yield* this.makeCodexRequest(requestBody, model, snapshot, state, signal, taskId, diagnostic)
+			return
+		}
 
+		const client = this.client ?? new OpenAI({
+			apiKey: snapshot.accessToken,
+			baseURL: CODEX_API_BASE_URL,
+			defaultHeaders: codexHeaders,
+			maxRetries: 0,
+		})
 		try {
-			// Prefer OpenAI SDK streaming (same approach as openai-native) so event handling
-			// is consistent across providers.
-			// An SDK error is terminal for this transport; never replay a dispatched request.
-
-				// Get ChatGPT account ID for organization subscriptions
-				const accountId = await openAiCodexOAuthManager.getAccountId()
-
-				// Build Codex-specific headers. Authorization is provided by the SDK apiKey.
-				const codexHeaders: Record<string, string> = {
-					originator: "kilo-code", // kilocode_change
-					session_id: taskId || this.sessionId,
-					"User-Agent": DEFAULT_HEADERS["User-Agent"], // kilocode_change
-					...(accountId ? { "ChatGPT-Account-Id": accountId } : {}),
+			diagnostic?.("sdk.open.start")
+			const stream = await (client as any).responses.create(requestBody, {
+				signal,
+				headers: codexHeaders,
+				maxRetries: 0,
+				timeout: Math.max(1, deadlineAt - Date.now()),
+			}) as AsyncIterable<any>
+			diagnostic?.("sdk.open.end")
+			if (typeof stream?.[Symbol.asyncIterator] !== "function") {
+				throw new CodexRequestError("Codex SDK did not provide a stream", "interrupted")
+			}
+			for await (const event of stream) {
+				if (signal.aborted) throw codexAbortReason(signal)
+				state.eventsSeen = true
+				for await (const output of this.processEvent(event, model, state)) {
+					if (signal.aborted) throw codexAbortReason(signal)
+					yield output
 				}
-
-				// Allow tests to inject a client. If none is injected, create one for this request.
-				const client =
-					this.client ??
-					new OpenAI({
-						apiKey: accessToken,
-						baseURL: CODEX_API_BASE_URL,
-						defaultHeaders: codexHeaders,
-						maxRetries: 0,
-					})
-
-				diagnostic?.("sdk.open.start") // kilocode_change
-				const stream = (await (client as any).responses.create(requestBody, {
-					signal: this.abortController.signal,
-					// If the SDK supports per-request overrides, ensure headers are present.
-					headers: codexHeaders,
-				})) as AsyncIterable<any>
-				diagnostic?.("sdk.open.end") // kilocode_change
-
-				if (typeof (stream as any)?.[Symbol.asyncIterator] !== "function") {
-					throw new Error(
-						"OpenAI SDK did not return an AsyncIterable for Responses API streaming.",
-					)
-				}
-
-				for await (const event of stream) {
-					// kilocode_change start
-					sdkEvents++
-					if (sdkEvents === 1) diagnostic?.("sdk.first_event")
-					// kilocode_change end
-					if (this.abortController.signal.aborted) {
-						break
-					}
-
-					for await (const outChunk of this.processEvent(event, model)) {
-						sdkChunks++ // kilocode_change
-						yield outChunk
-					}
-				}
-		} finally {
-			this.abortController = undefined
+			}
+		} catch (error) {
+			if (signal.aborted) throw codexAbortReason(signal)
+			if (error instanceof CodexRequestError) throw error
+			const status = typeof (error as any)?.status === "number" ? (error as any).status : undefined
+			const headers = (error as any)?.headers
+			const retryAfter = headers?.get?.("retry-after") ?? headers?.["retry-after"]
+			const retryAfterSeconds = Number(retryAfter)
+			const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+				? retryAfterSeconds * 1000 : undefined
+			throw new CodexRequestError(
+				status ? "Codex request rejected (HTTP " + status + ")" : "Codex transport interrupted",
+				status ? "http" : "interrupted",
+				status,
+				!state.eventsSeen && status !== undefined && (status === 429 || status >= 500 && status <= 599),
+				retryAfterMs,
+			)
 		}
 	}
 
@@ -581,374 +610,126 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 	private async *makeCodexRequest(
 		requestBody: any,
 		model: OpenAiCodexModel,
-		accessToken: string,
+		snapshot: { accessToken: string; accountId?: string },
+		state: CodexRequestState,
+		signal: AbortSignal,
 		taskId?: string,
-		diagnostic?: (phase: string, details?: Record<string, number | boolean>) => void, // kilocode_change
+		diagnostic?: (phase: string, details?: Record<string, number | boolean>) => void,
 	): ApiStream {
-		// Per the implementation guide: route to Codex backend with Bearer token
-		const url = `${CODEX_API_BASE_URL}/responses`
-
-		// Get ChatGPT account ID for organization subscriptions
-		const accountId = await openAiCodexOAuthManager.getAccountId()
-
-		// Build headers with required Codex-specific fields
+		if (signal.aborted) throw codexAbortReason(signal)
 		const headers: Record<string, string> = {
 			"Content-Type": "application/json",
-			Authorization: `Bearer ${accessToken}`,
-			originator: "kilo-code", // kilocode_change
+			Authorization: "Bearer " + snapshot.accessToken,
+			originator: "kilo-code",
 			session_id: taskId || this.sessionId,
-			"User-Agent": DEFAULT_HEADERS["User-Agent"], // kilocode_change
+			"User-Agent": DEFAULT_HEADERS["User-Agent"],
+			...(snapshot.accountId ? { "ChatGPT-Account-Id": snapshot.accountId } : {}),
 		}
-
-		// Add ChatGPT-Account-Id if available (required for organization subscriptions)
-		if (accountId) {
-			headers["ChatGPT-Account-Id"] = accountId
-		}
-
+		let response: Response
 		try {
-			diagnostic?.("sse.open.start") // kilocode_change
-			const response = await fetch(url, {
-				method: "POST",
-				headers,
-				body: JSON.stringify(requestBody),
-				signal: this.abortController?.signal,
+			diagnostic?.("sse.open.start")
+			response = await fetch(CODEX_API_BASE_URL + "/responses", {
+				method: "POST", headers, body: JSON.stringify(requestBody), signal,
 			})
-			diagnostic?.("sse.open.end", { httpStatus: response.status }) // kilocode_change
-
-			if (!response.ok) {
-				const errorText = await response.text()
-
-				let errorMessage = t("common:errors.api.apiRequestFailed", { status: response.status })
-				let errorDetails = ""
-
-				try {
-					const errorJson = JSON.parse(errorText)
-					if (errorJson.error?.message) {
-						errorDetails = errorJson.error.message
-					} else if (errorJson.message) {
-						errorDetails = errorJson.message
-					} else if (errorJson.detail) {
-						errorDetails = errorJson.detail
-					} else {
-						errorDetails = errorText
-					}
-				} catch {
-					errorDetails = errorText
-				}
-
-				switch (response.status) {
-					case 400:
-						errorMessage = t("common:errors.openAiCodex.invalidRequest")
-						break
-					case 401:
-						errorMessage = t("common:errors.openAiCodex.authenticationFailed")
-						break
-					case 403:
-						errorMessage = t("common:errors.openAiCodex.accessDenied")
-						break
-					case 404:
-						errorMessage = t("common:errors.openAiCodex.endpointNotFound")
-						break
-					case 429:
-						errorMessage = t("common:errors.openAiCodex.rateLimitExceeded")
-						break
-					case 500:
-					case 502:
-					case 503:
-						errorMessage = t("common:errors.openAiCodex.serviceError")
-						break
-					default:
-						errorMessage = t("common:errors.openAiCodex.genericError", { status: response.status })
-				}
-
-				if (errorDetails) {
-					errorMessage += ` - ${errorDetails}`
-				}
-
-				throw new Error(errorMessage)
-			}
-
-			if (!response.body) {
-				throw new Error(t("common:errors.openAiCodex.noResponseBody"))
-			}
-
-			// kilocode_change start
-			diagnostic?.("sse.read.start")
-			let chunks = 0
-			for await (const chunk of this.handleStreamResponse(response.body, model)) {
-				if (++chunks === 1) diagnostic?.("sse.first_chunk")
-				yield chunk
-			}
-			diagnostic?.("sse.read.end", { chunks })
-			// kilocode_change end
+			diagnostic?.("sse.open.end", { httpStatus: response.status })
 		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error)
-			const apiError = new ApiProviderError(errorMessage, this.providerName, model.id, "createMessage")
-			TelemetryService.instance.captureException(apiError)
-
-			if (error instanceof Error) {
-				if (error.message.includes("Codex API")) {
-					throw error
-				}
-				throw new Error(t("common:errors.openAiCodex.connectionFailed", { message: error.message }))
-			}
-			throw new Error(t("common:errors.openAiCodex.unexpectedConnectionError"))
+			if (signal.aborted) throw codexAbortReason(signal)
+			throw new CodexRequestError("Codex SSE transport interrupted", "interrupted")
 		}
+		if (!response.ok) {
+			// HTTP 429 / 5xx is an explicit pre-response refusal; do not log the response body.
+			const retryAfter = Number(response.headers.get("retry-after"))
+			const retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0
+				? retryAfter * 1000 : undefined
+			void response.body?.cancel().catch(() => {})
+			throw new CodexRequestError(
+				"Codex request rejected (HTTP " + response.status + ")",
+				"http",
+				response.status,
+				response.status === 429 || response.status >= 500 && response.status <= 599,
+				retryAfterMs,
+			)
+		}
+		if (!response.body) throw new CodexRequestError("Codex response body missing", "interrupted")
+		diagnostic?.("sse.read.start")
+		yield* this.handleStreamResponse(response.body, model, state, signal)
+		diagnostic?.("sse.read.end")
 	}
 
-	private async *handleStreamResponse(body: ReadableStream<Uint8Array>, model: OpenAiCodexModel): ApiStream {
+	private async *handleStreamResponse(
+		body: ReadableStream<Uint8Array>,
+		model: OpenAiCodexModel,
+		state: CodexRequestState,
+		signal: AbortSignal,
+	): ApiStream {
 		const reader = body.getReader()
 		const decoder = new TextDecoder()
-		let buffer = ""
-		let hasContent = false
-
+		let pending = ""
+		const parseFrame = (frame: string): any | null => {
+			const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:"))
+				.map((line) => line.slice(5).trimStart()).join("\n")
+			if (!data || data === "[DONE]") return null
+			try {
+				return JSON.parse(data)
+			} catch {
+				throw new CodexRequestError("Malformed Codex SSE frame", "interrupted")
+			}
+		}
 		try {
 			while (true) {
-				if (this.abortController?.signal.aborted) {
-					break
-				}
-
+				if (signal.aborted) throw codexAbortReason(signal)
 				const { done, value } = await reader.read()
 				if (done) break
-
-				buffer += decoder.decode(value, { stream: true })
-				const lines = buffer.split("\n")
-				buffer = lines.pop() || ""
-
-				for (const line of lines) {
-					if (line.startsWith("data: ")) {
-						const data = line.slice(6).trim()
-						if (data === "[DONE]") {
-							continue
-						}
-
-						try {
-							const parsed = JSON.parse(data)
-
-							// Capture response metadata
-							if (parsed.response?.output && Array.isArray(parsed.response.output)) {
-								this.lastResponseOutput = parsed.response.output
-							}
-							if (parsed.response?.id) {
-								this.lastResponseId = parsed.response.id as string
-							}
-
-							// Delegate standard event types
-							if (parsed?.type && this.coreHandledEventTypes.has(parsed.type)) {
-								// Capture tool call identity from output_item events so we can
-								// emit tool_call_partial for subsequent function_call_arguments.delta events
-								if (
-									parsed.type === "response.output_item.added" ||
-									parsed.type === "response.output_item.done"
-								) {
-									const item = parsed.item
-									if (item && (item.type === "function_call" || item.type === "tool_call")) {
-										const callId = item.call_id || item.tool_call_id || item.id
-										const name = item.name || item.function?.name || item.function_name
-										if (typeof callId === "string" && callId.length > 0) {
-											this.pendingToolCallId = callId
-											this.pendingToolCallName = typeof name === "string" ? name : undefined
-										}
-									}
-								}
-
-								// Some Codex streams only return tool calls (no text). Treat tool output as content.
-								if (
-									parsed.type === "response.function_call_arguments.delta" ||
-									parsed.type === "response.tool_call_arguments.delta" ||
-									parsed.type === "response.output_item.added" ||
-									parsed.type === "response.output_item.done"
-								) {
-									hasContent = true
-								}
-
-								for await (const outChunk of this.processEvent(parsed, model)) {
-									if (outChunk.type === "text" || outChunk.type === "reasoning") {
-										hasContent = true
-									}
-									yield outChunk
-								}
-								continue
-							}
-
-							// Handle complete response
-							if (parsed.response && parsed.response.output && Array.isArray(parsed.response.output)) {
-								for (const outputItem of parsed.response.output) {
-									if (outputItem.type === "text" && outputItem.content) {
-										for (const content of outputItem.content) {
-											if (content.type === "text" && content.text) {
-												hasContent = true
-												yield { type: "text", text: content.text }
-											}
-										}
-									}
-									if (outputItem.type === "reasoning" && Array.isArray(outputItem.summary)) {
-										for (const summary of outputItem.summary) {
-											if (summary?.type === "summary_text" && typeof summary.text === "string") {
-												hasContent = true
-												yield { type: "reasoning", text: summary.text }
-											}
-										}
-									}
-								}
-								if (parsed.response.usage) {
-									const usageData = this.normalizeUsage(parsed.response.usage, model)
-									if (usageData) {
-										yield usageData
-									}
-								}
-							} else if (
-								parsed.type === "response.text.delta" ||
-								parsed.type === "response.output_text.delta"
-							) {
-								if (parsed.delta) {
-									hasContent = true
-									yield { type: "text", text: parsed.delta }
-								}
-							} else if (
-								parsed.type === "response.reasoning.delta" ||
-								parsed.type === "response.reasoning_text.delta"
-							) {
-								if (parsed.delta) {
-									hasContent = true
-									yield { type: "reasoning", text: parsed.delta }
-								}
-							} else if (
-								parsed.type === "response.reasoning_summary.delta" ||
-								parsed.type === "response.reasoning_summary_text.delta"
-							) {
-								if (parsed.delta) {
-									hasContent = true
-									yield { type: "reasoning", text: parsed.delta }
-								}
-							} else if (parsed.type === "response.refusal.delta") {
-								if (parsed.delta) {
-									hasContent = true
-									yield { type: "text", text: `[Refusal] ${parsed.delta}` }
-								}
-							} else if (parsed.type === "response.output_item.added") {
-								if (parsed.item) {
-									if (parsed.item.type === "text" && parsed.item.text) {
-										hasContent = true
-										yield { type: "text", text: parsed.item.text }
-									} else if (parsed.item.type === "reasoning" && parsed.item.text) {
-										hasContent = true
-										yield { type: "reasoning", text: parsed.item.text }
-									} else if (parsed.item.type === "message" && parsed.item.content) {
-										for (const content of parsed.item.content) {
-											if (content.type === "text" && content.text) {
-												hasContent = true
-												yield { type: "text", text: content.text }
-											}
-										}
-									}
-								}
-							} else if (parsed.type === "response.error" || parsed.type === "error") {
-								if (parsed.error || parsed.message) {
-									throw new Error(
-										t("common:errors.openAiCodex.apiError", {
-											message: parsed.error?.message || parsed.message || "Unknown error",
-										}),
-									)
-								}
-							} else if (parsed.type === "response.failed") {
-								if (parsed.error || parsed.message) {
-									throw new Error(
-										t("common:errors.openAiCodex.responseFailed", {
-											message: parsed.error?.message || parsed.message || "Unknown failure",
-										}),
-									)
-								}
-							} else if (parsed.type === "response.completed" || parsed.type === "response.done") {
-								if (parsed.response?.output && Array.isArray(parsed.response.output)) {
-									this.lastResponseOutput = parsed.response.output
-								}
-								if (parsed.response?.id) {
-									this.lastResponseId = parsed.response.id as string
-								}
-
-								if (
-									!hasContent &&
-									parsed.response &&
-									parsed.response.output &&
-									Array.isArray(parsed.response.output)
-								) {
-									for (const outputItem of parsed.response.output) {
-										if (outputItem.type === "message" && outputItem.content) {
-											for (const content of outputItem.content) {
-												if (content.type === "output_text" && content.text) {
-													hasContent = true
-													yield { type: "text", text: content.text }
-												}
-											}
-										}
-										if (outputItem.type === "reasoning" && Array.isArray(outputItem.summary)) {
-											for (const summary of outputItem.summary) {
-												if (
-													summary?.type === "summary_text" &&
-													typeof summary.text === "string"
-												) {
-													hasContent = true
-													yield { type: "reasoning", text: summary.text }
-												}
-											}
-										}
-									}
-								}
-							} else if (parsed.choices?.[0]?.delta?.content) {
-								hasContent = true
-								yield { type: "text", text: parsed.choices[0].delta.content }
-							} else if (
-								parsed.item &&
-								typeof parsed.item.text === "string" &&
-								parsed.item.text.length > 0
-							) {
-								hasContent = true
-								yield { type: "text", text: parsed.item.text }
-							} else if (parsed.usage) {
-								const usageData = this.normalizeUsage(parsed.usage, model)
-								if (usageData) {
-									yield usageData
-								}
-							}
-						} catch (e) {
-							if (!(e instanceof SyntaxError)) {
-								throw e
-							}
-						}
-					} else if (line.trim() && !line.startsWith(":")) {
-						try {
-							const parsed = JSON.parse(line)
-							if (parsed.content || parsed.text || parsed.message) {
-								hasContent = true
-								yield { type: "text", text: parsed.content || parsed.text || parsed.message }
-							}
-						} catch {
-							// Not JSON, ignore
-						}
+				pending += decoder.decode(value, { stream: true })
+				const frames = pending.split(/\r?\n\r?\n/)
+				pending = frames.pop() ?? ""
+				for (const frame of frames) {
+					const event = parseFrame(frame)
+					if (!event) continue
+					state.eventsSeen = true
+					for await (const out of this.processEvent(event, model, state)) {
+						if (signal.aborted) throw codexAbortReason(signal)
+						yield out
 					}
 				}
 			}
-		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : String(error)
-			const apiError = new ApiProviderError(errorMessage, this.providerName, model.id, "createMessage")
-			TelemetryService.instance.captureException(apiError)
-
-			if (error instanceof Error) {
-				throw new Error(t("common:errors.openAiCodex.streamProcessingError", { message: error.message }))
+			pending += decoder.decode()
+			// The final SSE frame need not end with a newline.
+			if (pending.trim()) {
+				const event = parseFrame(pending)
+				if (event) {
+					state.eventsSeen = true
+					for await (const out of this.processEvent(event, model, state)) {
+						if (signal.aborted) throw codexAbortReason(signal)
+						yield out
+					}
+				}
 			}
-			throw new Error(t("common:errors.openAiCodex.unexpectedStreamError"))
 		} finally {
+			// Abort is already signalled on cancellation. Cancel the reader on early return.
+			void reader.cancel().catch(() => {})
 			reader.releaseLock()
 		}
 	}
 
-	private async *processEvent(event: any, model: OpenAiCodexModel): ApiStream {
+	private async *processEvent(event: any, model: OpenAiCodexModel, state: CodexRequestState): ApiStream {
 		if (event?.response?.output && Array.isArray(event.response.output)) {
-			this.lastResponseOutput = event.response.output
+			state.responseOutput = event.response.output
 		}
 		if (event?.response?.id) {
-			this.lastResponseId = event.response.id as string
+			state.responseId = event.response.id as string
+		}
+
+		// Terminal states are authoritative: EOF or a failed/incomplete response is never success.
+		const responseStatus = event?.response?.status
+		if (
+			event?.type === "response.failed" || event?.type === "response.error" || event?.type === "error" ||
+			event?.type === "response.incomplete" || responseStatus === "failed" || responseStatus === "incomplete"
+		) {
+			throw new CodexRequestError("Codex response failed or incomplete", "interrupted")
+		}
+		if (event?.type === "response.completed" || event?.type === "response.done") {
+			state.completed = true
 		}
 
 		// Handle text deltas
@@ -987,8 +768,8 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 			event?.type === "response.tool_call_arguments.delta" ||
 			event?.type === "response.function_call_arguments.delta"
 		) {
-			const callId = event.call_id || event.tool_call_id || event.id || this.pendingToolCallId
-			const name = event.name || event.function_name || this.pendingToolCallName
+			const callId = event.call_id || event.tool_call_id || event.id || state.pendingToolCallId
+			const name = event.name || event.function_name || state.pendingToolCallName
 			const args = event.delta || event.arguments
 
 			// Codex/Responses may stream tool-call arguments, but these delta events are not guaranteed
@@ -1023,8 +804,8 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 					const callId = item.call_id || item.tool_call_id || item.id
 					const name = item.name || item.function?.name || item.function_name
 					if (typeof callId === "string" && callId.length > 0) {
-						this.pendingToolCallId = callId
-						this.pendingToolCallName = typeof name === "string" ? name : undefined
+						state.pendingToolCallId = callId
+						state.pendingToolCallName = typeof name === "string" ? name : undefined
 					}
 				}
 

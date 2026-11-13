@@ -65,6 +65,7 @@ import { resolveToolProtocol, detectToolProtocolFromHistory } from "../../utils/
 import { ApiHandler, ApiHandlerCreateMessageMetadata, buildApiHandler } from "../../api"
 import { ApiStream, GroundingSource } from "../../api/transform/stream"
 import { maybeRemoveImageBlocks } from "../../api/transform/image-cleaning"
+import { getApiRequestTimeout } from "../../api/providers/utils/timeout-config"
 import { VirtualQuotaFallbackHandler } from "../../api/providers/virtual-quota-fallback" // kilocode_change: Import VirtualQuotaFallbackHandler for model change notifications
 
 // shared
@@ -4032,6 +4033,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 						// Clean up partial state
 						await abortStream(cancelReason, streamingFailedMessage)
+						// Never replay a Codex request after an interrupted stream,
+						// including reasoning/tool fragments that were not shown as text.
+						if (this.apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest) {
+							throw error
+						}
 						// kilocode_change start
 						// Bound retries for repeated Chutes "terminated" stream failures
 						// to prevent indefinite thinking/retry loops.
@@ -4089,7 +4095,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						streamAbortSignal.removeEventListener("abort", streamAbortListener)
 					}
 					// Clean up the abort controller when streaming completes
-					this.currentRequestAbortController = undefined
+					if (this.currentRequestAbortController?.signal === streamAbortSignal) {
+						this.currentRequestAbortController = undefined
+					}
 				}
 
 				// Need to call here in case the stream was aborted.
@@ -4871,11 +4879,17 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			skipProviderRateLimit?: boolean
 			/** Number of context-window overflow recovery attempts already made for this request chain. */
 			contextWindowRetryAttempt?: number
+			codexDeadlineAt?: number
 		} = {},
 	): ApiStream {
 		// kilocode_change end
 		const state = await this.providerRef.deref()?.getState()
 		const apiConfiguration = this.getSessionApiConfiguration()
+		// Preserve a single finite deadline across all Task-owned Codex auto-retries.
+		const rawCodexTimeout = getApiRequestTimeout()
+		const codexTimeout = typeof rawCodexTimeout === "number" && Number.isFinite(rawCodexTimeout) &&
+			rawCodexTimeout > 0 ? rawCodexTimeout : 600_000
+		const codexDeadlineAt = options.codexDeadlineAt ?? Date.now() + codexTimeout
 		const condensingSettings = await this.ensureSessionCondensingSettings()
 
 		const {
@@ -5205,7 +5219,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 		// Create an AbortController to allow cancelling the request mid-stream
 		this.currentRequestAbortController = new AbortController()
-		const abortSignal = this.currentRequestAbortController.signal
+		const requestController = this.currentRequestAbortController
+		const abortSignal = requestController.signal
 		// Reset the flag after using it
 		this.skipPrevResponseIdOnce = false
 
@@ -5235,6 +5250,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			systemPrompt,
 			cleanConversationHistory as unknown as Anthropic.Messages.MessageParam[],
 			metadata,
+			{ signal: abortSignal, deadlineAt: codexDeadlineAt },
 		)
 		const iterator = stream[Symbol.asyncIterator]()
 
@@ -5242,7 +5258,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// to avoid accumulating listeners on the AbortSignal
 		const abortCleanupListener = () => {
 			console.log(`[Task#${this.taskId}.${this.instanceId}] AbortSignal triggered for current request`)
-			this.currentRequestAbortController = undefined
+			if (this.currentRequestAbortController === requestController) {
+				this.currentRequestAbortController = undefined
+			}
 		}
 		abortSignal.addEventListener("abort", abortCleanupListener)
 
@@ -5266,10 +5284,20 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			const firstChunkPromise = iterator.next()
 
 			const firstChunk = await Promise.race([firstChunkPromise, abortPromise])
+			if (firstChunk.done) throw new Error("API stream ended before first chunk")
 			yield firstChunk.value
 			this.isWaitingForFirstChunk = false
 		} catch (error) {
 			this.isWaitingForFirstChunk = false
+			// Abort the losing network attempt before backoff or resubmission.
+			requestController.abort()
+			// An unknown dispatch outcome is not proof that a Codex replay is safe.
+			if (
+				(apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest) &&
+				(!(error as any)?.safeToRetry || retryAttempt >= 2 || this.abort)
+			) {
+				throw error
+			}
 			// kilocode_change start
 			if (apiConfiguration?.apiProvider === "kilocode" && isAnyRecognizedKiloCodeError(error)) {
 				const defaultFreeModel = (
@@ -5321,7 +5349,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 				const { response } = askResponse
 
-				this.currentRequestAbortController = undefined
+				if (this.currentRequestAbortController === requestController) {
+					this.currentRequestAbortController = undefined
+				}
 				// kilocode_change: removed unused isContextWindowExceededError local;
 				// context-window overflow recovery is now handled generically in
 				// the shared first-chunk error path below.
@@ -5401,7 +5431,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 				// Delegate generator output from the recursive call with
 				// incremented retry count.
-				yield* this.attemptApiRequest(retryAttempt + 1)
+				yield* this.attemptApiRequest(retryAttempt + 1, { ...options, codexDeadlineAt })
 
 				return
 			} else {
@@ -5430,6 +5460,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			abortSignal.removeEventListener("abort", abortCleanupListener)
 			if (firstChunkAbortListener) {
 				abortSignal.removeEventListener("abort", firstChunkAbortListener)
+			}
+			if (this.currentRequestAbortController === requestController && abortSignal.aborted) {
+				this.currentRequestAbortController = undefined
 			}
 		}
 		// kilocode_change end
@@ -5482,7 +5515,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				}
 			}
 
-			const finalDelay = Math.max(exponentialDelay, rateLimitDelay)
+			const retryAfterSeconds = Number.isFinite(error?.retryAfterMs)
+				? Math.max(0, Math.ceil(error.retryAfterMs / 1000)) : 0
+			const finalDelay = Math.max(exponentialDelay, rateLimitDelay, retryAfterSeconds)
 			if (finalDelay <= 0) {
 				return
 			}

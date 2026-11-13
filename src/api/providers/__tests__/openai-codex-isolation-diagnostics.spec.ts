@@ -133,7 +133,7 @@ describe("Codex isolation diagnostics", () => {
 	})
 
 	function provider() {
-		vi.spyOn(openAiCodexOAuthManager, "getAccessToken").mockResolvedValue("synthetic-private-token")
+		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot").mockResolvedValue({ accessToken: "synthetic-private-token" })
 		vi.spyOn(openAiCodexOAuthManager, "getAccountId").mockResolvedValue(null)
 		return new OpenAiCodexHandler({ apiModelId: "gpt-6.1-sol" })
 	}
@@ -227,7 +227,7 @@ describe("Codex isolation diagnostics", () => {
 	it("closes the diagnostic lifecycle after an authentication failure without leaking error content", async () => {
 		vi.useFakeTimers()
 		const handler = provider()
-		vi.mocked(openAiCodexOAuthManager.getAccessToken).mockRejectedValue(new Error("PRIVATE AUTH ERROR"))
+		vi.mocked(openAiCodexOAuthManager.getTokenSnapshot).mockRejectedValue(new Error("PRIVATE AUTH ERROR"))
 
 		await expect(consume(handler, "task-auth-failed")).rejects.toThrow("PRIVATE AUTH ERROR")
 
@@ -270,4 +270,95 @@ describe("Codex isolation diagnostics", () => {
 		expect((starts[0][1] as any).requestId).not.toBe((starts[1][1] as any).requestId)
 		expect((starts[0][1] as any).handlerId).not.toBe((starts[1][1] as any).handlerId)
 	})
+
+	it("rejects a second concurrent request on the same handler without corrupting the first", async () => {
+		const handler = provider()
+		let release!: () => void
+		const gate = new Promise<void>((resolve) => { release = resolve })
+		;(handler as any).client = { responses: { create: vi.fn(async () => ({
+			async *[Symbol.asyncIterator]() {
+				await gate
+				yield { type: "response.completed", response: { id: "response_first", output: [] } }
+			},
+		})) } }
+		const first = consume(handler, "first")
+		await Promise.resolve()
+		await Promise.resolve()
+		await expect(consume(handler, "second")).rejects.toThrow(/already processing/)
+		release()
+		await first
+		expect(handler.getResponseId()).toBe("response_first")
+	})
+
+	it("does not accept EOF or incomplete terminal state as a successful response", async () => {
+		const handler = provider()
+		const create = vi.fn()
+			.mockResolvedValueOnce({ async *[Symbol.asyncIterator]() {
+				yield { type: "response.reasoning.delta", delta: "partial" }
+			} })
+			.mockResolvedValueOnce({ async *[Symbol.asyncIterator]() {
+				yield { type: "response.completed", response: { status: "incomplete" } }
+			} })
+		;(handler as any).client = { responses: { create } }
+		await expect(consume(handler, "eof")).rejects.toThrow(/closed without a completed response/)
+		await expect(consume(handler, "incomplete")).rejects.toThrow(/failed or incomplete/)
+		expect(handler.getResponseId()).toBeUndefined()
+	})
+
+	it("aborts a pending SDK request at the shared deadline, without retry", async () => {
+		const handler = provider()
+		vi.useFakeTimers()
+		const controller = new AbortController()
+		const create = vi.fn((_body: unknown, options: { signal: AbortSignal }) =>
+			new Promise((_resolve, reject) => {
+				options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true })
+			}))
+		;(handler as any).client = { responses: { create } }
+		const running = (async () => {
+			for await (const _chunk of handler.createMessage("system", [], undefined, {
+				signal: controller.signal, deadlineAt: Date.now() + 250,
+			})) { /* no content expected */ }
+		})()
+		await vi.advanceTimersByTimeAsync(300)
+		await expect(running).rejects.toThrow(/deadline exceeded/)
+		expect(create).toHaveBeenCalledTimes(1)
+	})
+
+	it("refuses to dispatch when the task was already cancelled", async () => {
+		const handler = provider()
+		const controller = new AbortController()
+		controller.abort()
+		const create = vi.fn()
+		;(handler as any).client = { responses: { create } }
+		await expect(async () => {
+			for await (const _chunk of handler.createMessage("system", [], undefined, { signal: controller.signal })) {}
+		}).rejects.toThrow(/cancelled/)
+		expect(create).not.toHaveBeenCalled()
+	})
+
+	it("recognizes a complete SSE terminal event without trailing newline", async () => {
+		const handler = provider()
+		;(handler as any).useManualSse = true
+		const payload = 'data: ' + JSON.stringify({
+			type: "response.completed", response: { id: "sse_final", output: [], status: "completed" },
+		})
+		vi.stubGlobal("fetch", vi.fn(async () => new Response(payload, {
+			headers: { "Content-Type": "text/event-stream" },
+		})))
+		await consume(handler, "sse")
+		expect(handler.getResponseId()).toBe("sse_final")
+	})
+
+	it("does not convert a structured 403 response into an OAuth refresh", async () => {
+		const handler = provider()
+		const refresh = vi.spyOn(openAiCodexOAuthManager, "forceRefreshTokenSnapshot")
+		const create = vi.fn().mockRejectedValue({ status: 403 })
+		;(handler as any).client = { responses: { create } }
+		await expect(consume(handler, "forbidden")).rejects.toMatchObject({
+			codexRequest: true, status: 403, safeToRetry: false,
+		})
+		expect(create).toHaveBeenCalledTimes(1)
+		expect(refresh).not.toHaveBeenCalled()
+	})
+
 })
