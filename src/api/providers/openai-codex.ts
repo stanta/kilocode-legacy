@@ -62,6 +62,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 	private abortController?: AbortController
 	// Session ID for the Codex API (persists for the lifetime of the handler)
 	private readonly sessionId: string
+	private activeDiagnosticRequests = 0 // kilocode_change
 	/**
 	 * Some Codex/Responses streams emit tool-call argument deltas without stable call id/name.
 	 * Track the last observed tool identity from output_item events so we can still
@@ -140,7 +141,42 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		metadata?: ApiHandlerCreateMessageMetadata,
 	): ApiStream {
 		const model = this.getModel()
-		yield* this.handleResponsesApiMessage(model, systemPrompt, messages, metadata)
+		// kilocode_change start: observe isolation and stalls without changing request behavior.
+		const requestId = uuidv7()
+		const started = Date.now()
+		let phase = "request.start"
+		this.activeDiagnosticRequests++
+		const diagnostic = (nextPhase: string, details: Record<string, number | boolean> = {}) => {
+			phase = nextPhase
+			// Do not log credentials, account identifiers, prompts, error bodies, or tool arguments.
+			console.info("[OpenAI Codex] Request diagnostic", {
+				pid: process.pid,
+				handlerId: this.sessionId,
+				requestId,
+				taskId: metadata?.taskId,
+				phase,
+				elapsedMs: Date.now() - started,
+				activeHandlerRequests: this.activeDiagnosticRequests,
+				...details,
+			})
+		}
+		diagnostic(phase)
+		const heartbeat = setInterval(() => diagnostic(phase, { waiting: true }), 30_000)
+		heartbeat.unref()
+		try {
+			yield* this.handleResponsesApiMessage(model, systemPrompt, messages, metadata, diagnostic)
+			diagnostic("request.completed")
+		} catch (error) {
+			diagnostic("request.error", {
+				...(typeof error?.status === "number" ? { httpStatus: error.status } : {}),
+			})
+			throw error
+		} finally {
+			clearInterval(heartbeat)
+			this.activeDiagnosticRequests--
+			diagnostic("request.closed")
+		}
+		// kilocode_change end
 	}
 
 	private async *handleResponsesApiMessage(
@@ -148,6 +184,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		systemPrompt: string,
 		messages: Anthropic.Messages.MessageParam[],
 		metadata?: ApiHandlerCreateMessageMetadata,
+		diagnostic?: (phase: string, details?: Record<string, number | boolean>) => void, // kilocode_change
 	): ApiStream {
 		// Reset state for this request
 		this.lastResponseOutput = undefined
@@ -156,7 +193,9 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		this.pendingToolCallName = undefined
 
 		// Get access token from OAuth manager
+		diagnostic?.("auth.start") // kilocode_change
 		let accessToken = await openAiCodexOAuthManager.getAccessToken()
+		diagnostic?.("auth.end", { authenticated: !!accessToken }) // kilocode_change
 		if (!accessToken) {
 			throw new Error(
 				t("common:errors.openAiCodex.notAuthenticated", {
@@ -180,7 +219,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		// Make the request with retry on auth failure
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
-				yield* this.executeRequest(requestBody, model, accessToken, metadata?.taskId)
+				yield* this.executeRequest(requestBody, model, accessToken, metadata?.taskId, diagnostic) // kilocode_change
 				return
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error)
@@ -188,7 +227,9 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 
 				if (attempt === 0 && isAuthFailure) {
 					// Force refresh the token for retry
+					diagnostic?.("auth.refresh.start") // kilocode_change
 					const refreshed = await openAiCodexOAuthManager.forceRefreshAccessToken()
+					diagnostic?.("auth.refresh.end", { authenticated: !!refreshed }) // kilocode_change
 					if (!refreshed) {
 						throw new Error(
 							t("common:errors.openAiCodex.notAuthenticated", {
@@ -343,9 +384,14 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		model: OpenAiCodexModel,
 		accessToken: string,
 		taskId?: string,
+		diagnostic?: (phase: string, details?: Record<string, number | boolean>) => void, // kilocode_change
 	): ApiStream {
 		// Create AbortController for cancellation
 		this.abortController = new AbortController()
+		// kilocode_change start
+		let sdkEvents = 0
+		let sdkChunks = 0
+		// kilocode_change end
 
 		try {
 			// Prefer OpenAI SDK streaming (same approach as openai-native) so event handling
@@ -371,11 +417,13 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 						defaultHeaders: codexHeaders,
 					})
 
+				diagnostic?.("sdk.open.start") // kilocode_change
 				const stream = (await (client as any).responses.create(requestBody, {
 					signal: this.abortController.signal,
 					// If the SDK supports per-request overrides, ensure headers are present.
 					headers: codexHeaders,
 				})) as AsyncIterable<any>
+				diagnostic?.("sdk.open.end") // kilocode_change
 
 				if (typeof (stream as any)?.[Symbol.asyncIterator] !== "function") {
 					throw new Error(
@@ -384,17 +432,30 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 				}
 
 				for await (const event of stream) {
+					// kilocode_change start
+					sdkEvents++
+					if (sdkEvents === 1) diagnostic?.("sdk.first_event")
+					// kilocode_change end
 					if (this.abortController.signal.aborted) {
 						break
 					}
 
 					for await (const outChunk of this.processEvent(event, model)) {
+						sdkChunks++ // kilocode_change
 						yield outChunk
 					}
 				}
 			} catch (_sdkErr) {
 				// Fallback to manual SSE via fetch (Codex backend).
-				yield* this.makeCodexRequest(requestBody, model, accessToken, taskId)
+				// kilocode_change start: expose replays after partial output; do not log error messages.
+				diagnostic?.("fallback.start", {
+					sdkEvents,
+					sdkChunks,
+					aborted: this.abortController?.signal.aborted ?? false,
+					...(typeof _sdkErr?.status === "number" ? { httpStatus: _sdkErr.status } : {}),
+				})
+				// kilocode_change end
+				yield* this.makeCodexRequest(requestBody, model, accessToken, taskId, diagnostic) // kilocode_change
 			}
 		} finally {
 			this.abortController = undefined
@@ -532,6 +593,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		model: OpenAiCodexModel,
 		accessToken: string,
 		taskId?: string,
+		diagnostic?: (phase: string, details?: Record<string, number | boolean>) => void, // kilocode_change
 	): ApiStream {
 		// Per the implementation guide: route to Codex backend with Bearer token
 		const url = `${CODEX_API_BASE_URL}/responses`
@@ -554,12 +616,14 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		}
 
 		try {
+			diagnostic?.("sse.open.start") // kilocode_change
 			const response = await fetch(url, {
 				method: "POST",
 				headers,
 				body: JSON.stringify(requestBody),
 				signal: this.abortController?.signal,
 			})
+			diagnostic?.("sse.open.end", { httpStatus: response.status }) // kilocode_change
 
 			if (!response.ok) {
 				const errorText = await response.text()
@@ -618,7 +682,15 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 				throw new Error(t("common:errors.openAiCodex.noResponseBody"))
 			}
 
-			yield* this.handleStreamResponse(response.body, model)
+			// kilocode_change start
+			diagnostic?.("sse.read.start")
+			let chunks = 0
+			for await (const chunk of this.handleStreamResponse(response.body, model)) {
+				if (++chunks === 1) diagnostic?.("sse.first_chunk")
+				yield chunk
+			}
+			diagnostic?.("sse.read.end", { chunks })
+			// kilocode_change end
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error)
 			const apiError = new ApiProviderError(errorMessage, this.providerName, model.id, "createMessage")
