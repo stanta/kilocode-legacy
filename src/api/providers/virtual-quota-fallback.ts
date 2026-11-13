@@ -88,6 +88,7 @@ export class VirtualQuotaFallbackHandler extends EventEmitter implements ApiHand
 			await this.usage.consume(this.activeProfileId, "requests", 1)
 
 			const stream = this.activeHandler.createMessage(systemPrompt, messages, metadata)
+			let hasOutput = false
 			try {
 				for await (const chunk of stream) {
 					if (chunk.type === "usage") {
@@ -96,9 +97,15 @@ export class VirtualQuotaFallbackHandler extends EventEmitter implements ApiHand
 							await this.usage.consume(this.activeProfileId, "tokens", totalTokens)
 						}
 					}
+					hasOutput = true
 					yield chunk
 				}
 			} catch (error) {
+				// A dispatched request may already have executed tools or produced output.
+				// Never replay a partially observed response with another provider.
+				if (hasOutput) {
+					throw error
+				}
 				// Check if this is a retryable error (rate limit or overload)
 				if (this.isRateLimitError(error) || this.isOverloadError(error)) {
 					// Set a short cooldown (10 seconds) to prevent rapid cycling

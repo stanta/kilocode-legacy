@@ -88,7 +88,7 @@ describe("Codex isolation diagnostics", () => {
 		expect(submitted).toEqual(["synthetic-refresh-old", "synthetic-refresh-old"])
 	})
 
-	it("reproduces a stale window deleting credentials already refreshed by another window", async () => {
+	it("does not delete credentials refreshed by another window after invalid_grant", async () => {
 		const secrets = sharedStorage(credentials("old"))
 		const a = manager(secrets)
 		const b = manager(secrets)
@@ -101,8 +101,8 @@ describe("Codex isolation diagnostics", () => {
 		)
 
 		expect(await b.getAccessToken()).toBeNull()
-		expect(await secrets.get(OPENAI_CODEX_CREDENTIALS_KEY)).toBeUndefined()
-		// The first window still has a usable token cached while shared storage is empty.
+		expect(JSON.parse((await secrets.get(OPENAI_CODEX_CREDENTIALS_KEY))!).access_token).toBe("synthetic-access-new")
+		// A failed refresh must never delete another window's credentials.
 		expect(await a.getAccessToken()).toBe("synthetic-access-new")
 	})
 
@@ -142,7 +142,7 @@ describe("Codex isolation diagnostics", () => {
 		return chunks
 	}
 
-	it("logs a correlated transport replay after partial SDK output without logging payloads", async () => {
+	it("does not replay a partial SDK response or log payloads", async () => {
 		const handler = provider()
 		;(handler as any).client = {
 			responses: {
@@ -163,16 +163,18 @@ describe("Codex isolation diagnostics", () => {
 		const fetchMock = vi.fn(async () => new Response(events))
 		vi.stubGlobal("fetch", fetchMock)
 
-		const chunks = await consume(handler, "task-replay")
-
-		expect(chunks).toEqual([
-			{ type: "reasoning", text: "First attempt" },
-			{ type: "reasoning", text: "Replayed attempt" },
-		])
-		expect(fetchMock).toHaveBeenCalledTimes(1)
+		const chunks = []
+		await expect(async () => {
+			for await (const chunk of handler.createMessage("PRIVATE PROMPT", [{ role: "user", content: "PRIVATE TEXT" }], {
+				taskId: "task-replay",
+			})) {
+				chunks.push(chunk)
+			}
+		}).rejects.toThrow("simulated disconnection")
+		expect(chunks).toEqual([{ type: "reasoning", text: "First attempt" }])
+		expect(fetchMock).not.toHaveBeenCalled()
 		const infoCalls = vi.mocked(console.info).mock.calls
-		const fallback = infoCalls.find((call) => (call[1] as any)?.phase === "fallback.start")
-		expect(fallback?.[1]).toMatchObject({ taskId: "task-replay", sdkEvents: 1, sdkChunks: 1, pid: process.pid })
+		expect(infoCalls.some((call) => (call[1] as any)?.phase === "fallback.start")).toBe(false)
 		expect(JSON.stringify(infoCalls)).not.toMatch(/PRIVATE|synthetic-private-token/)
 	})
 

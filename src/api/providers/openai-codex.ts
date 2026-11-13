@@ -396,7 +396,8 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		try {
 			// Prefer OpenAI SDK streaming (same approach as openai-native) so event handling
 			// is consistent across providers.
-			try {
+			// An SDK error is terminal for this transport; never replay a dispatched request.
+
 				// Get ChatGPT account ID for organization subscriptions
 				const accountId = await openAiCodexOAuthManager.getAccountId()
 
@@ -415,6 +416,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 						apiKey: accessToken,
 						baseURL: CODEX_API_BASE_URL,
 						defaultHeaders: codexHeaders,
+						maxRetries: 0,
 					})
 
 				diagnostic?.("sdk.open.start") // kilocode_change
@@ -427,7 +429,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 
 				if (typeof (stream as any)?.[Symbol.asyncIterator] !== "function") {
 					throw new Error(
-						"OpenAI SDK did not return an AsyncIterable for Responses API streaming. Falling back to SSE.",
+						"OpenAI SDK did not return an AsyncIterable for Responses API streaming.",
 					)
 				}
 
@@ -445,18 +447,6 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 						yield outChunk
 					}
 				}
-			} catch (_sdkErr) {
-				// Fallback to manual SSE via fetch (Codex backend).
-				// kilocode_change start: expose replays after partial output; do not log error messages.
-				diagnostic?.("fallback.start", {
-					sdkEvents,
-					sdkChunks,
-					aborted: this.abortController?.signal.aborted ?? false,
-					...(typeof _sdkErr?.status === "number" ? { httpStatus: _sdkErr.status } : {}),
-				})
-				// kilocode_change end
-				yield* this.makeCodexRequest(requestBody, model, accessToken, taskId, diagnostic) // kilocode_change
-			}
 		} finally {
 			this.abortController = undefined
 		}

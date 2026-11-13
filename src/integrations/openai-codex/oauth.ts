@@ -412,8 +412,7 @@ export class OpenAiCodexOAuthManager {
 			this.refreshPromise = null
 			this.logError("[openai-codex-oauth] Failed to force refresh token:", error)
 			if (error instanceof OpenAiCodexOAuthTokenError && error.isLikelyInvalidGrant()) {
-				this.log("[openai-codex-oauth] Refresh token appears invalid; clearing stored credentials")
-				await this.clearCredentials()
+				this.log("[openai-codex-oauth] Refresh token rejected; explicit sign-in may be required")
 			}
 			return null
 		}
@@ -430,6 +429,7 @@ export class OpenAiCodexOAuthManager {
 		try {
 			const credentialsJson = await this.context.secrets.get(OPENAI_CODEX_CREDENTIALS_KEY)
 			if (!credentialsJson) {
+				this.credentials = null
 				return null
 			}
 
@@ -437,6 +437,7 @@ export class OpenAiCodexOAuthManager {
 			this.credentials = openAiCodexCredentialsSchema.parse(parsed)
 			return this.credentials
 		} catch (error) {
+			this.credentials = null
 			this.logError("[openai-codex-oauth] Failed to load credentials:", error)
 			return null
 		}
@@ -509,8 +510,7 @@ export class OpenAiCodexOAuthManager {
 
 				// Only clear secrets when the refresh token is clearly invalid/revoked.
 				if (error instanceof OpenAiCodexOAuthTokenError && error.isLikelyInvalidGrant()) {
-					this.log("[openai-codex-oauth] Refresh token appears invalid; clearing stored credentials")
-					await this.clearCredentials()
+					this.log("[openai-codex-oauth] Refresh token rejected; explicit sign-in may be required")
 				}
 				return null
 			}
