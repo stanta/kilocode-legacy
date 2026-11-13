@@ -170,7 +170,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		const reasoningEffort = this.getReasoningEffort(model)
 
 		// Format conversation
-		const formattedInput = this.formatFullConversation(systemPrompt, messages)
+		const formattedInput = this.formatFullConversation(systemPrompt, messages, metadata?.taskId) // kilocode_change
 
 		// Build request body
 		// Per the implementation guide: Codex backend may reject some parameters
@@ -401,7 +401,11 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		}
 	}
 
-	private formatFullConversation(systemPrompt: string, messages: Anthropic.Messages.MessageParam[]): any {
+	private formatFullConversation(
+		systemPrompt: string,
+		messages: Anthropic.Messages.MessageParam[],
+		taskId?: string, // kilocode_change
+	): any {
 		const formattedInput: any[] = []
 
 		for (const message of messages) {
@@ -482,7 +486,45 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 			}
 		}
 
-		return formattedInput
+		// kilocode_change start
+		// A completed task may be continued with an older attempt_completion still lacking
+		// its result. Validate the final, normalized input, not just the last assistant turn.
+		// Repair only this control tool: never invent execution results for other tools.
+		const outputCallIds = new Set(
+			formattedInput.filter((item) => item.type === "function_call_output").map((item) => item.call_id),
+		)
+		const repairedCompletionCallIds: string[] = []
+		const unresolvedCallIds: string[] = []
+		const validatedInput = formattedInput.flatMap((item) => {
+			if (item.type !== "function_call" || outputCallIds.has(item.call_id)) {
+				return [item]
+			}
+			if (item.name !== "attempt_completion") {
+				unresolvedCallIds.push(item.call_id)
+				return [item]
+			}
+
+			repairedCompletionCallIds.push(item.call_id)
+			return [
+				item,
+				{
+					type: "function_call_output",
+					call_id: item.call_id,
+					output: "The result of this earlier attempt_completion was not recorded. User acceptance is unknown. Continue using the subsequent conversation, if any.",
+				},
+			]
+		})
+
+		if (repairedCompletionCallIds.length > 0 || unresolvedCallIds.length > 0) {
+			// Only protocol identifiers: no message contents, tool arguments, or credentials.
+			console.warn("[OpenAI Codex] Incomplete tool history", {
+				taskId,
+				repairedCompletionCallIds,
+				unresolvedCallIds,
+			})
+		}
+		return validatedInput
+		// kilocode_change end
 	}
 
 	private async *makeCodexRequest(
