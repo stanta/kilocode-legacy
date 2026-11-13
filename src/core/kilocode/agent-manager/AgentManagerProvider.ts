@@ -47,7 +47,6 @@ import { startSessionMessageSchema, type StartSessionMessage } from "./types"
 import { openImage } from "../../../integrations/misc/image-handler"
 import { getModelsFromCache } from "../../../api/providers/fetchers/modelCache"
 import { isRouterName, type ModelRecord } from "../../../shared/api"
-import { OPENAI_CODEX_CREDENTIALS_KEY } from "../../../integrations/openai-codex/oauth"
 
 /**
  * Message format for sending responses to the agent runtime via IPC.
@@ -846,28 +845,8 @@ export class AgentManagerProvider implements vscode.Disposable {
 			)
 		}
 
-		// When using OpenAI Codex (ChatGPT Plus/Pro), pass OAuth credentials to the agent process
-		// so it can authenticate; the agent process has its own context and no access to main extension secrets
-		let secrets: Record<string, string> | undefined
-		if (apiConfiguration?.apiProvider === "openai-codex") {
-			try {
-				const credentialsJson = await this.context.secrets.get(OPENAI_CODEX_CREDENTIALS_KEY)
-				if (credentialsJson) {
-					secrets = { [OPENAI_CODEX_CREDENTIALS_KEY]: credentialsJson }
-					this.outputChannel.appendLine("[AgentManager] Passing OpenAI Codex credentials to agent process")
-				} else {
-					this.outputChannel.appendLine(
-						"[AgentManager] OpenAI Codex selected but no credentials found; sign in using the Kilo Code sidebar first.",
-					)
-				}
-			} catch (error) {
-				this.outputChannel.appendLine(
-					`[AgentManager] Failed to read OpenAI Codex credentials: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				)
-			}
-		}
+		// Codex child agents request access token snapshots over trusted IPC.
+		// Never serialize refresh tokens in AGENT_CONFIG or child process environment.
 
 		// RuntimeProcessHandler uses fork() with agent-runtime, cliPath is ignored
 		this.processHandler.spawnProcess(
@@ -880,7 +859,6 @@ export class AgentManagerProvider implements vscode.Disposable {
 				customModes,
 				// Pass worktree info for session state tracking
 				worktreeInfo: options.worktreeInfo,
-				secrets,
 			},
 			(sid, event) => {
 				if (!this.processStartTimes.has(sid)) {

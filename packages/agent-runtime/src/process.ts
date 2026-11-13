@@ -47,6 +47,7 @@
  */
 
 import { createExtensionService, type ExtensionService } from "./services/extension.js"
+import { randomUUID } from "node:crypto"
 import { logs, setLogger, createIPCLogger } from "./utils/logger.js"
 import type { ExtensionMessage, WebviewMessage, ExtensionState, ModeConfig, ProviderSettings } from "./types/index.js"
 
@@ -139,15 +140,20 @@ interface ResumeSessionData {
  * IPC message types from parent
  */
 interface ParentMessage {
-	type: "sendMessage" | "shutdown" | "injectConfig" | "resumeWithHistory"
+	type: "sendMessage" | "shutdown" | "injectConfig" | "resumeWithHistory" | "codexTokenResponse"
 	payload?: WebviewMessage | Partial<ExtensionState> | ResumeSessionData
+	requestId?: string
+	snapshot?: { accessToken: string; accountId?: string } | null
+	error?: { code: string; status?: number }
 }
 
 /**
  * IPC message types to parent
  */
 interface ChildMessage {
-	type: "ready" | "message" | "stateChange" | "error" | "warning"
+	type: "ready" | "message" | "stateChange" | "error" | "warning" | "codexTokenRequest"
+	requestId?: string
+	rejectedAccessToken?: string
 	payload?: ExtensionMessage
 	state?: ExtensionState
 	error?: { message: string; stack?: string; context?: string }
@@ -262,6 +268,43 @@ async function main(): Promise<void> {
 
 	let agent: ExtensionService | null = null
 
+	type CodexSnapshot = { accessToken: string; accountId?: string } | null
+	const pendingCodexTokens = new Map<string, {
+		resolve: (snapshot: CodexSnapshot) => void
+		reject: (error: Error) => void
+	}>()
+	const requestCodexSnapshot = (rejectedAccessToken?: string, signal?: AbortSignal): Promise<CodexSnapshot> => {
+		if (!process.send || !process.connected) {
+			return Promise.reject(new Error("Codex token parent is unavailable"))
+		}
+		if (signal?.aborted) return Promise.reject(new Error("Codex token request cancelled"))
+		return new Promise<CodexSnapshot>((resolve, reject) => {
+			const requestId = randomUUID()
+			const cleanup = () => {
+				clearTimeout(timer)
+				signal?.removeEventListener("abort", onAbort)
+				pendingCodexTokens.delete(requestId)
+			}
+			const finish = {
+				resolve: (snapshot: CodexSnapshot) => { cleanup(); resolve(snapshot) },
+				reject: (error: Error) => { cleanup(); reject(error) },
+			}
+			const onAbort = () => finish.reject(new Error("Codex token request cancelled"))
+			const timer = setTimeout(() => finish.reject(new Error("Codex token parent timed out")), 60_000)
+			timer.unref?.()
+			pendingCodexTokens.set(requestId, finish)
+			signal?.addEventListener("abort", onAbort, { once: true })
+			// The rejected version is used for a safe, single 401 refresh.
+			// Do not send refresh tokens or log this message's contents.
+			sendToParent({ type: "codexTokenRequest", requestId, rejectedAccessToken })
+		})
+	}
+	process.on("disconnect", () => {
+		for (const pending of [...pendingCodexTokens.values()]) {
+			pending.reject(new Error("Codex token parent disconnected"))
+		}
+	})
+
 	try {
 		// Create extension service with configuration
 		// Pass providerSettings at creation time to avoid race conditions
@@ -285,6 +328,9 @@ async function main(): Promise<void> {
 			// Inject provider configuration
 			try {
 				const extensionHost = agent!.getExtensionHost()
+				if (config.providerSettings.apiProvider === "openai-codex") {
+					extensionHost.setCodexTokenProvider(requestCodexSnapshot)
+				}
 				const stateConfig: Partial<ExtensionState> = {
 					apiConfiguration: config.providerSettings,
 					currentApiConfigName: "default",
@@ -311,9 +357,12 @@ async function main(): Promise<void> {
 
 				await extensionHost.injectConfiguration(stateConfig)
 				// kilocode_change start
-				// Inject OAuth/secrets so providers like OpenAI Codex can authenticate
-				if (config.secrets && Object.keys(config.secrets).length > 0) {
-					await extensionHost.injectSecrets(config.secrets)
+				// Legacy config may include unrelated secrets; never inject copied Codex
+				// refresh credentials into a child, even from an older parent.
+				if (config.secrets) {
+					const safeEntries = Object.entries(config.secrets)
+						.filter(([key]) => key !== "openai-codex-oauth-credentials")
+					if (safeEntries.length) await extensionHost.injectSecrets(Object.fromEntries(safeEntries))
 				}
 				// kilocode_change end
 				logs.info("Configuration injected", "AgentProcess")
@@ -395,6 +444,18 @@ async function main(): Promise<void> {
 
 		// Set up message handler from parent
 		process.on("message", async (msg: ParentMessage) => {
+			if (msg.type === "codexTokenResponse") {
+				const pending = msg.requestId && pendingCodexTokens.get(msg.requestId)
+				if (pending) {
+					if (msg.error) {
+						pending.reject(new Error("Codex token parent failed (" + msg.error.code +
+							(msg.error.status ? ", HTTP " + msg.error.status : "") + ")"))
+					} else {
+						pending.resolve(msg.snapshot ?? null)
+					}
+				}
+				return // Do not log token/account response payloads.
+			}
 			// Log incoming message from parent
 			const payloadType = (msg.payload as { type?: string } | undefined)?.type || ""
 			const payloadText = (msg.payload as { text?: string } | undefined)?.text?.slice(0, 50) || ""

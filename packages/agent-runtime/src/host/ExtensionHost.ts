@@ -1147,6 +1147,26 @@ export class ExtensionHost extends EventEmitter {
 		this.broadcastStateUpdate()
 	}
 
+	/**
+	 * Child-only, trusted in-memory IPC bridge. The extension can request a
+	 * consistent access-token/account snapshot, never a refresh token.
+	 * Installs on the SAME context SecretStorage object used at activation.
+	 */
+	public setCodexTokenProvider(
+		provider: (
+			rejectedAccessToken?: string,
+			signal?: AbortSignal,
+		) => Promise<{ accessToken: string; accountId?: string } | null>,
+	): void {
+		if (!this.vscodeAPI?.context?.secrets) {
+			throw new Error("Agent Codex token provider requires initialized VS Code context")
+		}
+		const storage = this.vscodeAPI.context.secrets as typeof this.vscodeAPI.context.secrets & {
+			getCodexTokenSnapshot?: typeof provider
+		}
+		storage.getCodexTokenSnapshot = provider
+	}
+
 	// kilocode_change start
 	/**
 	 * Inject secrets (e.g. OAuth credentials) into the extension context's SecretStorage.

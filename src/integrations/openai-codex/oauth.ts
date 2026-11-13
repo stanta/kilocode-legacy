@@ -352,6 +352,7 @@ export class OpenAiCodexOAuthManager {
 	private secretSubscription?: { dispose(): void }
 	private cacheGeneration = 0
 	private authorizationGeneration = 0
+	private delegatedAuthenticated = false
 	private pendingAuth: {
 		codeVerifier: string
 		state: string
@@ -387,6 +388,23 @@ export class OpenAiCodexOAuthManager {
 		this.credentials = null
 		this.cacheGeneration++
 		this.context = null
+	}
+
+	private getDelegatedSnapshot(
+		rejectedAccessToken?: string,
+		signal?: AbortSignal,
+	): Promise<{ accessToken: string; accountId?: string } | null> | undefined {
+		const storage = this.context?.secrets as unknown as {
+			getCodexTokenSnapshot?: (
+				rejectedAccessToken?: string,
+				signal?: AbortSignal,
+			) => Promise<{ accessToken: string; accountId?: string } | null>
+		} | undefined
+		if (!storage?.getCodexTokenSnapshot) return undefined
+		return storage.getCodexTokenSnapshot(rejectedAccessToken, signal).then((snapshot) => {
+			this.delegatedAuthenticated = !!snapshot
+			return snapshot
+		})
 	}
 
 	private requireContext(): ExtensionContext {
@@ -479,7 +497,9 @@ export class OpenAiCodexOAuthManager {
 		return this.refreshPromise
 	}
 
-	async getTokenSnapshot(): Promise<{ accessToken: string; accountId?: string } | null> {
+	async getTokenSnapshot(signal?: AbortSignal): Promise<{ accessToken: string; accountId?: string } | null> {
+		const delegated = this.getDelegatedSnapshot(undefined, signal)
+		if (delegated) return delegated
 		const credentials = await this.loadCredentials()
 		if (!credentials) return null
 		const current = isTokenExpired(credentials) ? await this.runRefresh() : credentials
@@ -488,7 +508,10 @@ export class OpenAiCodexOAuthManager {
 
 	async forceRefreshTokenSnapshot(
 		rejectedAccessToken: string,
+		signal?: AbortSignal,
 	): Promise<{ accessToken: string; accountId?: string } | null> {
+		const delegated = this.getDelegatedSnapshot(rejectedAccessToken, signal)
+		if (delegated) return delegated
 		const credentials = await this.runRefresh(rejectedAccessToken)
 		return credentials ? { accessToken: credentials.access_token, accountId: credentials.accountId } : null
 	}
@@ -513,6 +536,7 @@ export class OpenAiCodexOAuthManager {
 
 	// Status checks must never rotate tokens or call the network.
 	async isAuthenticated(): Promise<boolean> {
+		if ((this.context?.secrets as any)?.getCodexTokenSnapshot) return this.delegatedAuthenticated
 		return (await this.loadCredentials()) !== null
 	}
 

@@ -26,6 +26,7 @@ import type {
 import { getModelId, withModelId, type ClineMessage, type ModeConfig, type ProviderSettings } from "@roo-code/types" // kilocode_change
 import { Package } from "../../../shared/package"
 import { buildApiHandler } from "../../../api" // kilocode_change
+import { openAiCodexOAuthManager, OPENAI_CODEX_CREDENTIALS_KEY } from "../../../integrations/openai-codex/oauth"
 
 /**
  * Timeout for pending sessions (ms) - if "ready" message doesn't arrive within this time,
@@ -37,7 +38,9 @@ const PENDING_SESSION_TIMEOUT_MS = 30_000
  * IPC messages from the agent process
  */
 interface AgentIPCMessage {
-	type: "ready" | "message" | "stateChange" | "error" | "warning" | "log"
+	type: "ready" | "message" | "stateChange" | "error" | "warning" | "log" | "codexTokenRequest"
+	requestId?: string
+	rejectedAccessToken?: string
 	payload?: unknown
 	state?: unknown
 	error?: { message: string; stack?: string; context?: string }
@@ -51,7 +54,10 @@ interface AgentIPCMessage {
  * IPC messages to the agent process
  */
 interface ParentIPCMessage {
-	type: "sendMessage" | "shutdown" | "injectConfig" | "resumeWithHistory"
+	type: "sendMessage" | "shutdown" | "injectConfig" | "resumeWithHistory" | "codexTokenResponse"
+	requestId?: string
+	snapshot?: { accessToken: string; accountId?: string } | null
+	error?: { code: string; status?: number }
 	payload?: unknown
 }
 
@@ -130,6 +136,7 @@ export class RuntimeProcessHandler {
 	private pendingResumeContinuation: Map<string, { prompt: string; images?: string[] }> = new Map()
 	// Track current mode for each session to detect mode changes
 	private sessionModes: Map<string, string> = new Map()
+	private readonly codexChildren = new WeakSet<ChildProcess>()
 	// VS Code app root path for finding bundled binaries
 	private vscodeAppRoot?: string
 
@@ -294,9 +301,10 @@ export class RuntimeProcessHandler {
 			}
 		}
 
-		// Pass secrets (e.g. OpenAI Codex OAuth credentials) so the agent process can authenticate
-		if (options?.secrets && Object.keys(options.secrets).length > 0) {
-			config.secrets = options.secrets
+		// Reject Codex credential copying, even when a legacy caller supplies options.secrets.
+		if (options?.secrets) {
+			const safeEntries = Object.entries(options.secrets).filter(([key]) => key !== OPENAI_CODEX_CREDENTIALS_KEY)
+			if (safeEntries.length) config.secrets = Object.fromEntries(safeEntries)
 		}
 
 		return { config, effectiveModel }
@@ -397,6 +405,10 @@ export class RuntimeProcessHandler {
 				detached: false,
 			})
 
+			// Only children launched for Codex may obtain a parent-owned token snapshot.
+			if (options?.apiConfiguration?.apiProvider === "openai-codex") {
+				this.codexChildren.add(proc)
+			}
 			// Store pending process info
 			this.pendingProcess = {
 				process: proc,
@@ -458,6 +470,11 @@ export class RuntimeProcessHandler {
 	): void {
 		const sessionId = this.getSessionIdForProcess(proc) || this.pendingProcess?.desiredSessionId || "pending"
 
+		// Secret-bearing IPC never passes through general logging or session events.
+		if (msg.type === "codexTokenRequest") {
+			void this.replyToCodexTokenRequest(proc, msg)
+			return
+		}
 		// Log incoming IPC message from agent (except verbose log messages)
 		if (msg.type !== "log") {
 			const payloadSummary = this.summarizePayload(msg)
@@ -484,6 +501,31 @@ export class RuntimeProcessHandler {
 			case "log":
 				this.handleAgentLog(proc, msg)
 				break
+		}
+	}
+
+	/** Handle child token requests only for a trusted Codex fork. */
+	private async replyToCodexTokenRequest(proc: ChildProcess, msg: AgentIPCMessage): Promise<void> {
+		const requestId = msg.requestId
+		if (typeof requestId !== "string" || requestId.length === 0 || requestId.length > 128) return
+		const send = (data: Pick<ParentIPCMessage, "snapshot" | "error">) => {
+			if (!proc.connected) return
+			const response: ParentIPCMessage = { type: "codexTokenResponse", requestId, ...data }
+			try { proc.send(response, () => {}) } catch { /* child exited */ }
+		}
+		if (!this.codexChildren.has(proc)) {
+			send({ error: { code: "not_authorized" } })
+			return
+		}
+		try {
+			const snapshot = typeof msg.rejectedAccessToken === "string"
+				? await openAiCodexOAuthManager.forceRefreshTokenSnapshot(msg.rejectedAccessToken)
+				: await openAiCodexOAuthManager.getTokenSnapshot()
+			send({ snapshot })
+		} catch (error) {
+			// Only a category and HTTP status cross IPC; never send raw endpoint bodies.
+			const status = typeof (error as any)?.status === "number" ? (error as any).status : undefined
+			send({ error: { code: "oauth_unavailable", ...(status ? { status } : {}) } })
 		}
 	}
 

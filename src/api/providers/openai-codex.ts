@@ -254,7 +254,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		diagnostic?: (phase: string, details?: Record<string, number | boolean>) => void,
 	): ApiStream {
 		diagnostic?.("auth.start")
-		let snapshot = await awaitCodexAuth(openAiCodexOAuthManager.getTokenSnapshot(), signal)
+		let snapshot = await awaitCodexAuth(openAiCodexOAuthManager.getTokenSnapshot(signal), signal)
 		diagnostic?.("auth.end", { authenticated: !!snapshot })
 		if (!snapshot) throw new CodexRequestError("Sign in to OpenAI Codex to continue", "auth")
 		const formattedInput = this.formatFullConversation(systemPrompt, messages, metadata?.taskId)
@@ -272,7 +272,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 
 				diagnostic?.("auth.refresh.start")
 				snapshot = await awaitCodexAuth(
-					openAiCodexOAuthManager.forceRefreshTokenSnapshot(snapshot.accessToken),
+					openAiCodexOAuthManager.forceRefreshTokenSnapshot(snapshot.accessToken, signal),
 					signal,
 				)
 				diagnostic?.("auth.refresh.end", { authenticated: !!snapshot })
