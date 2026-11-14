@@ -6,9 +6,13 @@ describe("Codex real SecretStorage probe contract (synthetic marker only)", () =
 	it("matches marker and local domain across two windows sharing a SecretStorage domain", async () => {
 		const shared = new Map<string, string>()
 		const secrets = {
-			store: vi.fn(async (key: string, value: string) => { shared.set(key, value) }),
+			store: vi.fn(async (key: string, value: string) => {
+				shared.set(key, value)
+			}),
 			get: vi.fn(async (key: string) => shared.get(key)),
-			delete: vi.fn(async (key: string) => { shared.delete(key) }),
+			delete: vi.fn(async (key: string) => {
+				shared.delete(key)
+			}),
 		}
 		const context = {
 			globalStorageUri: { scheme: "file", fsPath: "/synthetic/profile/extensions/kilocode" },
@@ -28,15 +32,21 @@ describe("Codex real SecretStorage probe contract (synthetic marker only)", () =
 	it("flags different lock domains even if the SecretStorage service is shared", async () => {
 		const values = new Map<string, string>()
 		const secrets = {
-			store: async (key: string, value: string) => { values.set(key, value) },
+			store: async (key: string, value: string) => {
+				values.set(key, value)
+			},
 			get: async (key: string) => values.get(key),
-			delete: async (key: string) => { values.delete(key) },
+			delete: async (key: string) => {
+				values.delete(key)
+			},
 		}
 		const a = {
-			globalStorageUri: { scheme: "file", fsPath: "/synthetic/profile-A/kilocode" }, secrets,
+			globalStorageUri: { scheme: "file", fsPath: "/synthetic/profile-A/kilocode" },
+			secrets,
 		} as unknown as ExtensionContext
 		const b = {
-			globalStorageUri: { scheme: "file", fsPath: "/synthetic/profile-B/kilocode" }, secrets,
+			globalStorageUri: { scheme: "file", fsPath: "/synthetic/profile-B/kilocode" },
+			secrets,
 		} as unknown as ExtensionContext
 		const first = await codexStorageProbe(a, "write")
 		const second = await codexStorageProbe(b, "read")

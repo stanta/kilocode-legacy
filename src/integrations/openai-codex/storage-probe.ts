@@ -50,7 +50,8 @@ export function registerCodexStorageProbe(
 		if (!action) return
 		try {
 			const result = await codexStorageProbe(context, action.action)
-			const message = "Codex probe: domain=" + result.domain + "; synthetic marker=" + (result.marker ?? "missing")
+			const message =
+				"Codex probe: domain=" + result.domain + "; synthetic marker=" + (result.marker ?? "missing")
 			output.appendLine(message)
 			await vscode.window.showInformationMessage(message)
 		} catch {

@@ -191,8 +191,12 @@ describe("delegated child OAuth snapshots", () => {
 		let stored: string | undefined
 		let releaseWrite!: () => void
 		let enteredWrite!: () => void
-		const entered = new Promise<void>((resolve) => { enteredWrite = resolve })
-		const blocked = new Promise<void>((resolve) => { releaseWrite = resolve })
+		const entered = new Promise<void>((resolve) => {
+			enteredWrite = resolve
+		})
+		const blocked = new Promise<void>((resolve) => {
+			releaseWrite = resolve
+		})
 		const context = {
 			globalStorageUri: { fsPath: directory, scheme: "file" },
 			secrets: {
@@ -202,7 +206,9 @@ describe("delegated child OAuth snapshots", () => {
 					await blocked
 					stored = value
 				},
-				delete: async () => { stored = undefined },
+				delete: async () => {
+					stored = undefined
+				},
 			},
 		} as unknown as ExtensionContext
 		const writer = new OpenAiCodexOAuthManager()
@@ -245,8 +251,12 @@ describe("delegated child OAuth snapshots", () => {
 		const owner = new AbortController()
 		let entered!: () => void
 		let complete!: () => void
-		const started = new Promise<void>((resolve) => { entered = resolve })
-		const gate = new Promise<void>((resolve) => { complete = resolve })
+		const started = new Promise<void>((resolve) => {
+			entered = resolve
+		})
+		const gate = new Promise<void>((resolve) => {
+			complete = resolve
+		})
 		try {
 			const commit = writeCodexSecretUnderLock(context, owner.signal, async () => {
 				entered()
@@ -279,18 +289,22 @@ describe("delegated child OAuth snapshots", () => {
 					stored = value
 					throw new Error("Commit acknowledgement lost")
 				},
-				delete: async () => { stored = undefined },
+				delete: async () => {
+					stored = undefined
+				},
 			},
 		} as unknown as ExtensionContext
 		const writer = new OpenAiCodexOAuthManager()
 		writer.initialize(context)
 		try {
-			await expect(writer.saveCredentials({
-				type: "openai-codex",
-				access_token: "synthetic-uncertain",
-				refresh_token: "synthetic-uncertain-refresh",
-				expires: Date.now() + 3600_000,
-			})).rejects.toThrow(/acknowledgement lost/)
+			await expect(
+				writer.saveCredentials({
+					type: "openai-codex",
+					access_token: "synthetic-uncertain",
+					refresh_token: "synthetic-uncertain-refresh",
+					expires: Date.now() + 3600_000,
+				}),
+			).rejects.toThrow(/acknowledgement lost/)
 			expect(existsSync(path.join(directory, ".openai-codex-secret-write-pending"))).toBe(true)
 			await expect(writer.getTokenSnapshot()).rejects.toThrow(/uncertain|recovery|pending/i)
 		} finally {
@@ -298,5 +312,4 @@ describe("delegated child OAuth snapshots", () => {
 			await rm(directory, { recursive: true, force: true })
 		}
 	})
-
 })
