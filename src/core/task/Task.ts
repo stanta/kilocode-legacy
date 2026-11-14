@@ -63,7 +63,7 @@ import { resolveToolProtocol, detectToolProtocolFromHistory } from "../../utils/
 
 // api
 import { ApiHandler, ApiHandlerCreateMessageMetadata, buildApiHandler } from "../../api"
-import { ApiStream, GroundingSource } from "../../api/transform/stream"
+import { ApiStream, type ApiStreamChunk, GroundingSource } from "../../api/transform/stream"
 import { maybeRemoveImageBlocks } from "../../api/transform/image-cleaning"
 import { getApiRequestTimeout } from "../../api/providers/utils/timeout-config"
 import { VirtualQuotaFallbackHandler } from "../../api/providers/virtual-quota-fallback" // kilocode_change: Import VirtualQuotaFallbackHandler for model change notifications
@@ -353,6 +353,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private readonly globalStoragePath: string
 	abort: boolean = false
 	currentRequestAbortController?: AbortController
+	private condenseAbortController?: AbortController
 	skipPrevResponseIdOnce: boolean = false
 
 	// TaskStatus
@@ -2246,17 +2247,18 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			newContextTokens = 0,
 			error,
 			condenseId,
-		} = await summarizeConversation(
+		} = await this.runCondensing((signal) => summarizeConversation(
 			this.apiConversationHistory,
-			this.api, // Main API handler (fallback)
-			systemPrompt, // Default summarization prompt (fallback)
+			this.api,
+			systemPrompt,
 			this.taskId,
 			prevContextTokens,
-			false, // manual trigger
-			customCondensingPrompt, // User's custom prompt
-			condensingApiHandler, // Specific handler for condensing
-			useNativeTools, // Pass native tools flag for proper message handling
-		)
+			false,
+			customCondensingPrompt,
+			condensingApiHandler,
+			useNativeTools,
+			signal,
+		))
 		if (error) {
 			this.say(
 				"condense_context_error",
@@ -2817,6 +2819,21 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			console.log(`[Task#${this.taskId}.${this.instanceId}] Aborting current HTTP request`)
 			this.currentRequestAbortController.abort()
 			this.currentRequestAbortController = undefined
+		}
+		this.condenseAbortController?.abort()
+	}
+
+	/** Condensing uses an independent handler and cancellation scope. */
+	private async runCondensing<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+		if (this.abort) throw new Error("Task cancelled before condensing")
+		if (this.condenseAbortController) throw new Error("Condensing is already active")
+		const controller = new AbortController()
+		this.condenseAbortController = controller
+		try {
+			return await operation(controller.signal)
+		} finally {
+			controller.abort()
+			if (this.condenseAbortController === controller) this.condenseAbortController = undefined
 		}
 	}
 
@@ -3456,8 +3473,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 					let item = await nextChunkWithAbort()
 					while (!item.done) {
+						if (this.abort || streamAbortSignal?.aborted) break
 						const chunk = item.value
 						item = await nextChunkWithAbort()
+						if (this.abort || streamAbortSignal?.aborted) break
 						if (!chunk) {
 							// Sometimes chunk is undefined, no idea that can cause
 							// it, but this workaround seems to fix it.
@@ -5091,17 +5110,18 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			)
 			console.log(`[Task#${this.taskId}] Re-condensing after uncondense - context tokens: ${prevContextTokens}`)
 
-			const recondenseResult = await summarizeConversation(
+			const recondenseResult = await this.runCondensing(async (signal) => summarizeConversation(
 				this.apiConversationHistory,
 				this.api,
 				await this.getSystemPrompt(),
 				this.taskId,
 				prevContextTokens,
-				true, // isAutomaticTrigger
-				undefined, // customCondensingPrompt - use default
-				undefined, // condensingApiHandler - use main handler (current model with extended thinking)
+				true,
+				undefined,
+				undefined,
 				this._taskToolProtocol === "native",
-			)
+				signal,
+			))
 
 			if (recondenseResult.error) {
 				console.error(`[Task#${this.taskId}] Re-condensation failed: ${recondenseResult.error}`)
@@ -5276,6 +5296,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			}
 		})
 
+		let firstChunkValue: ApiStreamChunk | undefined
 		try {
 			// Awaiting first chunk to see if it will throw an error.
 			this.isWaitingForFirstChunk = true
@@ -5285,12 +5306,30 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 			const firstChunk = await Promise.race([firstChunkPromise, abortPromise])
 			if (firstChunk.done) throw new Error("API stream ended before first chunk")
-			yield firstChunk.value
+			firstChunkValue = firstChunk.value
 			this.isWaitingForFirstChunk = false
 		} catch (error) {
 			this.isWaitingForFirstChunk = false
+			const cancelled = this.abort || abortSignal.aborted
 			// Abort the losing network attempt before backoff or resubmission.
 			requestController.abort()
+			const isCodexAttempt = apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest
+			const closePromise = iterator.return(undefined).then(() => true, () => false)
+			if (isCodexAttempt && !cancelled && (error as any)?.safeToRetry) {
+				// Never dispatch a second Codex attempt until the first iterator has closed.
+				let closeTimer: ReturnType<typeof setTimeout> | undefined
+				const closed = await Promise.race([
+					closePromise,
+					new Promise<boolean>((resolve) => {
+						closeTimer = setTimeout(() => resolve(false), 3000)
+					}),
+				])
+				if (closeTimer) clearTimeout(closeTimer)
+				if (!closed) throw new Error("Previous Codex request did not close; automatic retry refused")
+			} else {
+				void closePromise
+			}
+			if (cancelled) throw error
 			// An unknown dispatch outcome is not proof that a Codex replay is safe.
 			if (
 				(apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest) &&
@@ -5417,8 +5456,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// kilocode_change end
 			// note that this api_req_failed ask is unique in that we only present this option if the api hasn't streamed any content yet (ie it fails on the first chunk due), as it would allow them to hit a retry button. However if the api failed mid-stream, it could be in any arbitrary state where some tools may have executed, so that error is handled differently and requires cancelling the task entirely.
 			if (autoApprovalEnabled) {
+				const isCodexError = apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest
+				if (isCodexError && Date.now() >= codexDeadlineAt) throw error
 				// Apply shared exponential backoff and countdown UX
-				await this.backoffAndAnnounce(retryAttempt, error)
+				await this.backoffAndAnnounce(retryAttempt, error, isCodexError ? codexDeadlineAt : undefined)
+				if (isCodexError && Date.now() >= codexDeadlineAt) throw error
 
 				// CRITICAL: Check if task was aborted during the backoff countdown
 				// This prevents infinite loops when users cancel during auto-retry
@@ -5467,15 +5509,18 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 		// kilocode_change end
 
-		// No error, so we can continue to yield all remaining chunks.
-		// (Needs to be placed outside of try/catch since it we want caller to
-		// handle errors not with api_req_failed as that is reserved for first
-		// chunk failures only.)
-		// This delegates to another generator or iterable object. In this case,
-		// it's saying "yield all remaining values from this iterator". This
-		// effectively passes along all subsequent chunks from the original
-		// stream.
-		yield* iterator
+		// A caller can stop after the very first chunk. Abort network before
+		// requesting iterator.return(), so a blocked read cannot retain the socket.
+		try {
+			if (firstChunkValue !== undefined) yield firstChunkValue
+			yield* iterator
+		} finally {
+			requestController.abort()
+			void iterator.return(undefined).catch(() => {})
+			if (this.currentRequestAbortController === requestController) {
+				this.currentRequestAbortController = undefined
+			}
+		}
 
 		// kilocode_change start
 		if (apiConfiguration?.rateLimitAfter) {
@@ -5485,7 +5530,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	}
 
 	// Shared exponential backoff for retries (first-chunk and mid-stream)
-	private async backoffAndAnnounce(retryAttempt: number, error: any): Promise<void> {
+	private async backoffAndAnnounce(retryAttempt: number, error: any, deadlineAt?: number): Promise<void> {
 		try {
 			const state = await this.providerRef.deref()?.getState()
 			const baseDelay = state?.requestDelaySeconds || 5
@@ -5518,6 +5563,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			const retryAfterSeconds = Number.isFinite(error?.retryAfterMs)
 				? Math.max(0, Math.ceil(error.retryAfterMs / 1000)) : 0
 			const finalDelay = Math.max(exponentialDelay, rateLimitDelay, retryAfterSeconds)
+			if (deadlineAt !== undefined && Date.now() + finalDelay * 1000 >= deadlineAt) {
+				throw new Error("Codex request deadline will expire before retry")
+			}
 			if (finalDelay <= 0) {
 				return
 			}
@@ -5551,6 +5599,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 			await this.say("api_req_retry_delayed", headerText, undefined, false)
 		} catch (err) {
+			if (deadlineAt !== undefined) throw err
 			console.error("Exponential backoff failed:", err)
 		}
 	}

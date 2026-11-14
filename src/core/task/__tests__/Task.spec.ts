@@ -1017,6 +1017,64 @@ describe("Cline", () => {
 				expect(backoffSpy).not.toHaveBeenCalled()
 			})
 
+			it("retries an explicit pre-response Codex 429 only after closing the previous iterator", async () => {
+				const codex = { ...mockApiConfig, apiProvider: "openai-codex" as const, apiModelId: "gpt-5.2-2025-12-11" }
+				const task = new Task({
+					provider: mockProvider, apiConfiguration: codex, task: "codex retry", startTask: false,
+					context: mockExtensionContext,
+				})
+				mockProvider.getState = vi.fn().mockResolvedValue({
+					apiConfiguration: codex, autoApprovalEnabled: true, mode: "code",
+				})
+				const error = Object.assign(new Error("Codex HTTP 429"), {
+					codexRequest: true, status: 429, safeToRetry: true, retryAfterMs: 1000,
+				})
+				let closed = false
+				let attempts = 0
+				const create = vi.spyOn(task.api, "createMessage").mockImplementation(() => {
+					attempts++
+					if (attempts === 1) {
+						return (async function* () {
+							try { throw error } finally { closed = true }
+						})()
+					}
+					if (!closed) throw new Error("Unsafe retry before first stream closed")
+					return (async function* () { yield { type: "text" as const, text: "successful retry" } })()
+				})
+				const backoff = vi.spyOn(task as any, "backoffAndAnnounce").mockResolvedValue(undefined)
+				const iterator = task.attemptApiRequest(0, { skipProviderRateLimit: true })
+				expect((await iterator.next()).value).toEqual({ type: "text", text: "successful retry" })
+				await iterator.return(undefined)
+				expect(create).toHaveBeenCalledTimes(2)
+				expect(backoff).toHaveBeenCalledTimes(1)
+				expect(closed).toBe(true)
+			})
+
+			it.each([
+				{ name: "unknown network outcome", safeToRetry: false, initialAttempt: 0 },
+				{ name: "two retries exhausted", safeToRetry: true, initialAttempt: 2 },
+			])("does not replay Codex when $name", async ({ safeToRetry, initialAttempt }) => {
+				const codex = { ...mockApiConfig, apiProvider: "openai-codex" as const, apiModelId: "gpt-5.2-2025-12-11" }
+				const task = new Task({
+					provider: mockProvider, apiConfiguration: codex, task: "no unsafe retry", startTask: false,
+					context: mockExtensionContext,
+				})
+				mockProvider.getState = vi.fn().mockResolvedValue({
+					apiConfiguration: codex, autoApprovalEnabled: true, mode: "code",
+				})
+				const error = Object.assign(new Error("Codex interrupted"), {
+					codexRequest: true, safeToRetry,
+				})
+				const create = vi.spyOn(task.api, "createMessage").mockImplementation(
+					() => (async function* () { throw error })(),
+				)
+				const backoff = vi.spyOn(task as any, "backoffAndAnnounce").mockResolvedValue(undefined)
+				await expect(task.attemptApiRequest(initialAttempt, { skipProviderRateLimit: true }).next())
+					.rejects.toThrow("Codex interrupted")
+				expect(create).toHaveBeenCalledTimes(1)
+				expect(backoff).not.toHaveBeenCalled()
+			})
+
 			it("should apply Chutes terminated retry cap at the configured threshold", async () => {
 				const chutesConfig = {
 					...mockApiConfig,

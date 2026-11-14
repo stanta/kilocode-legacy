@@ -22,6 +22,7 @@ describe("Codex isolation diagnostics", () => {
 		vi.spyOn(console, "info").mockImplementation(() => {})
 		vi.spyOn(console, "log").mockImplementation(() => {})
 		vi.spyOn(console, "error").mockImplementation(() => {})
+		vi.spyOn(console, "debug").mockImplementation(() => {})
 		NativeToolCallParser.clearRawChunkState()
 		NativeToolCallParser.clearAllStreamingToolCalls()
 	})
@@ -177,7 +178,9 @@ describe("Codex isolation diagnostics", () => {
 			})) {
 				chunks.push(chunk)
 			}
-		}).rejects.toThrow("simulated disconnection")
+		}).rejects.toMatchObject({
+			codexRequest: true, code: "interrupted", safeToRetry: false,
+		})
 		expect(chunks).toEqual([{ type: "reasoning", text: "First attempt" }])
 		expect(fetchMock).not.toHaveBeenCalled()
 		const infoCalls = vi.mocked(console.info).mock.calls
@@ -209,7 +212,7 @@ describe("Codex isolation diagnostics", () => {
 
 		expect(
 			vi
-				.mocked(console.info)
+				.mocked(console.debug)
 				.mock.calls.some(
 					(call) => (call[1] as any)?.phase === "sdk.open.start" && (call[1] as any)?.waiting === true,
 				),
@@ -360,6 +363,52 @@ describe("Codex isolation diagnostics", () => {
 		})
 		expect(create).toHaveBeenCalledTimes(1)
 		expect(refresh).not.toHaveBeenCalled()
+	})
+
+
+	it("rejects a completed event containing a nested server error", async () => {
+		const handler = provider()
+		;(handler as any).client = { responses: { create: vi.fn(async () => ({
+			async *[Symbol.asyncIterator]() {
+				yield { type: "response.completed", response: {
+					status: "completed", error: { code: "internal" }, output: [],
+				} }
+			},
+		})) } }
+		await expect(consume(handler, "nested-error")).rejects.toMatchObject({
+			codexRequest: true, code: "interrupted",
+		})
+		expect(handler.getResponseId()).toBeUndefined()
+	})
+
+	it("prevents a 401 retry from silently changing the authenticated account", async () => {
+		const handler = provider()
+		vi.mocked(openAiCodexOAuthManager.getTokenSnapshot).mockResolvedValue({
+			accessToken: "old", accountId: "account-A",
+		})
+		vi.spyOn(openAiCodexOAuthManager, "forceRefreshTokenSnapshot").mockResolvedValue({
+			accessToken: "new", accountId: "account-B",
+		})
+		const create = vi.fn().mockRejectedValue({ status: 401 })
+		;(handler as any).client = { responses: { create } }
+		await expect(consume(handler, "account-changed")).rejects.toThrow(/account changed/)
+		expect(create).toHaveBeenCalledTimes(1)
+	})
+
+	it("stops processing events after terminal success", async () => {
+		const handler = provider()
+		let finallyCalled = false
+		;(handler as any).client = { responses: { create: vi.fn(async () => ({
+			async *[Symbol.asyncIterator]() {
+				try {
+					yield { type: "response.completed", response: { id: "final", status: "completed", output: [] } }
+					yield { type: "response.reasoning.delta", delta: "LATE" }
+				} finally { finallyCalled = true }
+			},
+		})) } }
+		expect(await consume(handler, "after-terminal")).toEqual([])
+		expect(finallyCalled).toBe(true)
+		expect(handler.getResponseId()).toBe("final")
 	})
 
 })

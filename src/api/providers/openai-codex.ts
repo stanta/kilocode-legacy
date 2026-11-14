@@ -1,4 +1,3 @@
-import * as os from "os"
 import { v7 as uuidv7 } from "uuid"
 import { Anthropic } from "@anthropic-ai/sdk"
 import OpenAI from "openai"
@@ -8,11 +7,8 @@ import {
 	openAiCodexDefaultModelId,
 	OpenAiCodexModelId,
 	openAiCodexModels,
-	type ReasoningEffort,
 	type ReasoningEffortExtended,
-	ApiProviderError,
 } from "@roo-code/types"
-import { TelemetryService } from "@roo-code/telemetry"
 
 import type { ApiHandlerOptions } from "../../shared/api"
 
@@ -20,17 +16,13 @@ import { ApiStream, ApiStreamUsageChunk } from "../transform/stream"
 import { getModelParams } from "../transform/model-params"
 
 import { BaseProvider } from "./base-provider"
-import type { SingleCompletionHandler, ApiHandlerCreateMessageMetadata, ApiHandlerRequestOptions } from "../index"
+import type { ApiHandlerCreateMessageMetadata, ApiHandlerRequestOptions } from "../index"
 import { getApiRequestTimeout } from "./utils/timeout-config"
 import { isMcpTool } from "../../utils/mcp-name"
 import { sanitizeOpenAiCallId } from "../../utils/tool-id"
 import { openAiCodexOAuthManager } from "../../integrations/openai-codex/oauth"
-import { t } from "../../i18n"
 
 import { DEFAULT_HEADERS } from "./constants" // kilocode-change
-
-// Get extension version for User-Agent header
-const extensionVersion: string = require("../../package.json").version ?? "unknown"
 
 export type OpenAiCodexModel = ReturnType<OpenAiCodexHandler["getModel"]>
 
@@ -100,17 +92,14 @@ function awaitCodexAuth<T>(operation: Promise<T>, signal: AbortSignal): Promise<
 
 export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: implements SingleCompletionHandler */ {
 	protected options: ApiHandlerOptions
-	private readonly providerName = "OpenAI Codex"
 	private client?: OpenAI
 	private activeRequest = false
-	/** Transport is chosen before dispatch. Never switch after an SDK error. */
-	private useManualSse = false
+	/** Opt-in transport for known SDK incompatibility; never fall back after dispatch. */
+	private useManualSse = process.env.KILOCODE_CODEX_TRANSPORT === "sse"
 	// Complete response output array
 	private lastResponseOutput: any[] | undefined
 	// Last top-level response id
 	private lastResponseId: string | undefined
-	// Abort controller for cancelling ongoing requests
-	private abortController?: AbortController
 	// Session ID for the Codex API (persists for the lifetime of the handler)
 	private readonly sessionId: string
 	private activeDiagnosticRequests = 0 // kilocode_change
@@ -201,7 +190,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		const diagnostic = (nextPhase: string, details: Record<string, number | boolean> = {}) => {
 			phase = nextPhase
 			// Do not log credentials, account identifiers, prompts, error bodies, or tool arguments.
-			try { console.info("[OpenAI Codex] Request diagnostic", {
+			try { (details.waiting ? console.debug : console.info)("[OpenAI Codex] Request diagnostic", {
 				pid: process.pid,
 				handlerId: this.sessionId,
 				requestId,
@@ -271,12 +260,16 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 					error.status !== 401 || state.eventsSeen || attempt !== 0) throw error
 
 				diagnostic?.("auth.refresh.start")
-				snapshot = await awaitCodexAuth(
+				const refreshed = await awaitCodexAuth(
 					openAiCodexOAuthManager.forceRefreshTokenSnapshot(snapshot.accessToken, signal),
 					signal,
 				)
-				diagnostic?.("auth.refresh.end", { authenticated: !!snapshot })
-				if (!snapshot) throw new CodexRequestError("Sign in to OpenAI Codex to continue", "auth", 401)
+				diagnostic?.("auth.refresh.end", { authenticated: !!refreshed })
+				if (!refreshed) throw new CodexRequestError("Sign in to OpenAI Codex to continue", "auth", 401)
+				if (refreshed.accountId !== snapshot.accountId) {
+					throw new CodexRequestError("Codex account changed during request; start a new request", "auth", 401)
+				}
+				snapshot = refreshed
 			}
 		}
 	}
@@ -461,6 +454,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 					if (signal.aborted) throw codexAbortReason(signal)
 					yield output
 				}
+				if (state.completed) break // do not wait for an extra EOF or accept late fragments
 			}
 		} catch (error) {
 			if (signal.aborted) throw codexAbortReason(signal)
@@ -691,6 +685,7 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 						if (signal.aborted) throw codexAbortReason(signal)
 						yield out
 					}
+					if (state.completed) return // no late events and no wait for server EOF
 				}
 			}
 			pending += decoder.decode()
@@ -706,8 +701,8 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 				}
 			}
 		} finally {
-			// Abort is already signalled on cancellation. Cancel the reader on early return.
-			void reader.cancel().catch(() => {})
+			// Completing or cancelling a stream must release the fetch body.
+			try { await reader.cancel() } catch { /* already closed */ }
 			reader.releaseLock()
 		}
 	}
@@ -724,7 +719,10 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		const responseStatus = event?.response?.status
 		if (
 			event?.type === "response.failed" || event?.type === "response.error" || event?.type === "error" ||
-			event?.type === "response.incomplete" || responseStatus === "failed" || responseStatus === "incomplete"
+			event?.type === "response.incomplete" || !!event?.response?.error ||
+			responseStatus === "failed" || responseStatus === "incomplete" || responseStatus === "cancelled" ||
+			((event?.type === "response.completed" || event?.type === "response.done") &&
+				responseStatus !== undefined && responseStatus !== "completed")
 		) {
 			throw new CodexRequestError("Codex response failed or incomplete", "interrupted")
 		}
@@ -904,110 +902,4 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		return this.lastResponseId
 	}
 
-	async completePrompt_deleted_by_kilocode_because_streaming_is_required(prompt: string): Promise<string> {
-		this.abortController = new AbortController()
-
-		try {
-			const model = this.getModel()
-
-			// Get access token
-			const accessToken = await openAiCodexOAuthManager.getAccessToken()
-			if (!accessToken) {
-				throw new Error(
-					t("common:errors.openAiCodex.notAuthenticated", {
-						defaultValue:
-							"Not authenticated with OpenAI Codex. Please sign in using the OpenAI Codex OAuth flow.",
-					}),
-				)
-			}
-
-			const reasoningEffort = this.getReasoningEffort(model)
-
-			const requestBody: any = {
-				model: model.id,
-				input: [
-					{
-						role: "user",
-						content: [{ type: "input_text", text: prompt }],
-					},
-				],
-				stream: false,
-				store: false,
-				...(reasoningEffort ? { include: ["reasoning.encrypted_content"] } : {}),
-			}
-
-			if (reasoningEffort) {
-				requestBody.reasoning = {
-					effort: reasoningEffort,
-					summary: "auto" as const,
-				}
-			}
-
-			const url = `${CODEX_API_BASE_URL}/responses`
-
-			// Get ChatGPT account ID for organization subscriptions
-			const accountId = await openAiCodexOAuthManager.getAccountId()
-
-			// Build headers with required Codex-specific fields
-			const headers: Record<string, string> = {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${accessToken}`,
-				originator: "kilo-code", // kilocode_change
-				session_id: this.sessionId,
-				"User-Agent": DEFAULT_HEADERS["User-Agent"], // kilocode_change
-			}
-
-			// Add ChatGPT-Account-Id if available
-			if (accountId) {
-				headers["ChatGPT-Account-Id"] = accountId
-			}
-
-			const response = await fetch(url, {
-				method: "POST",
-				headers,
-				body: JSON.stringify(requestBody),
-				signal: this.abortController.signal,
-			})
-
-			if (!response.ok) {
-				const errorText = await response.text()
-				throw new Error(
-					t("common:errors.openAiCodex.genericError", { status: response.status }) +
-						(errorText ? `: ${errorText}` : ""),
-				)
-			}
-
-			const responseData = await response.json()
-
-			if (responseData?.output && Array.isArray(responseData.output)) {
-				for (const outputItem of responseData.output) {
-					if (outputItem.type === "message" && outputItem.content) {
-						for (const content of outputItem.content) {
-							if (content.type === "output_text" && content.text) {
-								return content.text
-							}
-						}
-					}
-				}
-			}
-
-			if (responseData?.text) {
-				return responseData.text
-			}
-
-			return ""
-		} catch (error) {
-			const errorModel = this.getModel()
-			const errorMessage = error instanceof Error ? error.message : String(error)
-			const apiError = new ApiProviderError(errorMessage, this.providerName, errorModel.id, "completePrompt")
-			TelemetryService.instance.captureException(apiError)
-
-			if (error instanceof Error) {
-				throw new Error(t("common:errors.openAiCodex.completionError", { message: error.message }))
-			}
-			throw error
-		} finally {
-			this.abortController = undefined
-		}
-	}
 }
