@@ -1,4 +1,6 @@
 import * as fs from "fs/promises"
+import { readFileSync } from "fs"
+import { randomUUID } from "crypto"
 import * as path from "path"
 import * as lockfile from "proper-lockfile"
 import type { ExtensionContext } from "vscode"
@@ -10,6 +12,25 @@ import type { ExtensionContext } from "vscode"
  * Only supported when VS Code exposes a local globalStorageUri. Different
  * profiles and remote extension hosts are separate, unverified domains.
  */
+const CREDENTIAL_EPOCH_FILE = ".openai-codex-session-epoch"
+
+/** Non-secret generation, shared by collaborating windows in the same credential domain. */
+export function getCodexCredentialEpoch(context: Pick<ExtensionContext, "globalStorageUri">): string {
+	const directory = context.globalStorageUri?.fsPath
+	if (!directory) throw new Error("Codex OAuth credential domain unavailable")
+	try {
+		return readFileSync(path.join(directory, CREDENTIAL_EPOCH_FILE), "utf8").trim() || "0"
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return "0"
+		throw error
+	}
+}
+
+/** Advance only under withCodexOAuthLock, before committing login/logout. */
+export async function advanceCodexCredentialEpoch(context: Pick<ExtensionContext, "globalStorageUri">): Promise<void> {
+	await fs.writeFile(path.join(context.globalStorageUri.fsPath, CREDENTIAL_EPOCH_FILE), randomUUID(), { mode: 0o600 })
+}
+
 export async function withCodexOAuthLock<T>(
 	context: Pick<ExtensionContext, "globalStorageUri">,
 	action: (lockSignal: AbortSignal) => Promise<T>,
@@ -31,17 +52,22 @@ export async function withCodexOAuthLock<T>(
 			controller.abort(new Error("OpenAI Codex OAuth lock was lost"))
 		},
 	})
+	let actionError: unknown
 	try {
 		if (compromised) throw new Error("OpenAI Codex OAuth lock was lost")
 		const result = await action(controller.signal)
 		if (compromised) throw new Error("OpenAI Codex OAuth lock was lost")
 		return result
+	} catch (error) {
+		actionError = error
+		throw error
 	} finally {
 		controller.abort()
 		try {
 			await release()
 		} catch (error) {
-			if (!compromised) throw error
+			// Release errors must not hide the failed refresh or the compromised lock.
+			if (!actionError && !compromised) throw error
 		}
 	}
 }

@@ -17,6 +17,7 @@ import { NativeToolCallParser } from "../../../core/assistant-message/NativeTool
 // All network and secret-storage operations use synthetic data.
 describe("Codex isolation diagnostics", () => {
 	const lockDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-lock-tests-"))
+	afterAll(() => fs.rmSync(lockDirectory, { recursive: true, force: true }))
 	beforeEach(() => {
 		vi.spyOn(console, "info").mockImplementation(() => {})
 		vi.spyOn(console, "log").mockImplementation(() => {})

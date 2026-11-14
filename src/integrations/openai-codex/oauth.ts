@@ -3,7 +3,7 @@ import * as http from "http"
 import { URL } from "url"
 import type { ExtensionContext } from "vscode"
 import { z } from "zod"
-import { withCodexOAuthLock } from "./oauth-refresh-lock"
+import { withCodexOAuthLock, getCodexCredentialEpoch, advanceCodexCredentialEpoch } from "./oauth-refresh-lock"
 
 /**
  * OpenAI Codex OAuth Configuration
@@ -45,10 +45,10 @@ export type OpenAiCodexCredentials = z.infer<typeof openAiCodexCredentialsSchema
 
 // Token response schema from OpenAI
 const tokenResponseSchema = z.object({
-	access_token: z.string(),
+	access_token: z.string().min(1),
 	refresh_token: z.string().min(1).optional(),
 	id_token: z.string().optional(),
-	expires_in: z.number(),
+	expires_in: z.number().positive().finite(),
 	email: z.string().optional(),
 	token_type: z.string().optional(),
 })
@@ -247,7 +247,10 @@ export async function exchangeCodeForTokens(code: string, codeVerifier: string):
 
 	if (!response.ok) {
 		const errorText = await response.text()
-		throw new Error(`Token exchange failed: ${response.status} ${response.statusText} - ${errorText}`)
+		throw new OpenAiCodexOAuthTokenError("Token exchange failed (HTTP " + response.status + ")", {
+			status: response.status,
+			errorCode: parseOAuthErrorDetails(errorText).errorCode,
+		})
 	}
 
 	const data = await response.json()
@@ -356,6 +359,7 @@ export class OpenAiCodexOAuthManager {
 	private pendingAuth: {
 		codeVerifier: string
 		state: string
+		credentialEpoch: string
 		server?: http.Server
 	} | null = null
 
@@ -443,9 +447,15 @@ export class OpenAiCodexOAuthManager {
 		return null
 	}
 
-	async saveCredentials(credentials: OpenAiCodexCredentials): Promise<void> {
+	async saveCredentials(credentials: OpenAiCodexCredentials, expectedEpoch?: string): Promise<void> {
 		const validated = openAiCodexCredentialsSchema.parse(credentials)
-		await withCodexOAuthLock(this.requireContext(), async (lockSignal) => {
+		const context = this.requireContext()
+		await withCodexOAuthLock(context, async (lockSignal) => {
+			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
+			if (expectedEpoch !== undefined && getCodexCredentialEpoch(context) !== expectedEpoch) {
+				throw new Error("Authorization was superseded by another login or logout")
+			}
+			await advanceCodexCredentialEpoch(context)
 			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
 			await this.writeUnlocked(validated)
 		})
@@ -455,9 +465,12 @@ export class OpenAiCodexOAuthManager {
 		if (!this.context) return
 		this.authorizationGeneration++
 		this.cancelAuthorizationFlow()
-		await withCodexOAuthLock(this.requireContext(), async (lockSignal) => {
+		const context = this.requireContext()
+		await withCodexOAuthLock(context, async (lockSignal) => {
 			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
-			await this.requireContext().secrets.delete(OPENAI_CODEX_CREDENTIALS_KEY)
+			await advanceCodexCredentialEpoch(context)
+			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
+			await context.secrets.delete(OPENAI_CODEX_CREDENTIALS_KEY)
 			this.credentials = null
 			this.cacheGeneration++
 		})
@@ -556,6 +569,7 @@ export class OpenAiCodexOAuthManager {
 		this.pendingAuth = {
 			codeVerifier,
 			state,
+			credentialEpoch: getCodexCredentialEpoch(this.requireContext()),
 		}
 
 		return buildAuthorizationUrl(codeChallenge, state)
@@ -599,8 +613,8 @@ export class OpenAiCodexOAuthManager {
 
 					if (error) {
 						res.writeHead(400)
-						res.end(`Authentication failed: ${error}`)
-						reject(new Error(`OAuth error: ${error}`))
+						res.end("Authentication failed")
+						reject(new Error("OAuth authorization denied"))
 						server.close()
 						return
 					}
@@ -628,7 +642,7 @@ export class OpenAiCodexOAuthManager {
 						if (this.pendingAuth !== pendingAuth || this.authorizationGeneration !== authGeneration) {
 							throw new Error("Authorization flow was cancelled or superseded")
 						}
-						await this.saveCredentials(credentials)
+						await this.saveCredentials(credentials, pendingAuth.credentialEpoch)
 
 						res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
 						res.end(`<!DOCTYPE html>

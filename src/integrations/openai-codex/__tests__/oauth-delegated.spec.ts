@@ -41,4 +41,59 @@ describe("delegated child OAuth snapshots", () => {
 		await expect(manager.getTokenSnapshot(controller.signal)).rejects.toThrow(/cancelled/)
 		manager.dispose()
 	})
+
+	it("rejects an earlier login commit after another window has logged out", async () => {
+		const { OPENAI_CODEX_CREDENTIALS_KEY } = await import("../oauth")
+		const { getCodexCredentialEpoch } = await import("../oauth-refresh-lock")
+		const { mkdtemp, rm } = await import("node:fs/promises")
+		const { tmpdir } = await import("node:os")
+		const path = await import("node:path")
+		const directory = await mkdtemp(path.join(tmpdir(), "codex-oauth-epoch-"))
+		let secret: string | undefined
+		const context = {
+			globalStorageUri: { fsPath: directory, scheme: "file" },
+			secrets: {
+				get: async () => secret,
+				store: async (_key: string, value: string) => { secret = value },
+				delete: async () => { secret = undefined },
+			},
+		} as unknown as ExtensionContext
+		const a = new OpenAiCodexOAuthManager()
+		const b = new OpenAiCodexOAuthManager()
+		a.initialize(context)
+		b.initialize(context)
+		try {
+			const beforeLogout = getCodexCredentialEpoch(context)
+			await b.clearCredentials()
+			await expect(a.saveCredentials({
+				type: "openai-codex", access_token: "synthetic-access-old",
+				refresh_token: "synthetic-refresh-old", expires: Date.now() + 3600_000,
+			}, beforeLogout)).rejects.toThrow(/superseded/)
+			expect(await context.secrets.get(OPENAI_CODEX_CREDENTIALS_KEY)).toBeUndefined()
+		} finally {
+			a.dispose()
+			b.dispose()
+			await rm(directory, { recursive: true, force: true })
+		}
+	})
+
+	it("redacts token endpoint error body and rejects malformed expiration", async () => {
+		const { exchangeCodeForTokens } = await import("../oauth")
+		const secret = "PRIVATE_SECRET_IN_TOKEN_ENDPOINT"
+		const mock = vi.spyOn(globalThis, "fetch")
+			.mockResolvedValueOnce(Response.json({ error: "invalid_grant", error_description: secret }, { status: 400 }))
+			.mockResolvedValueOnce(Response.json({
+				access_token: "token", refresh_token: "refresh", expires_in: 0,
+			}))
+		try {
+			await expect(exchangeCodeForTokens("code", "verifier")).rejects.toMatchObject({
+				name: "OpenAiCodexOAuthTokenError", status: 400,
+			})
+			await expect(exchangeCodeForTokens("code", "verifier")).rejects.toThrow()
+			expect(mock).toHaveBeenCalledTimes(2)
+		} finally {
+			mock.mockRestore()
+		}
+	})
+
 })
