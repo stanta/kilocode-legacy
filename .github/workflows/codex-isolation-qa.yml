@@ -1,0 +1,50 @@
+name: Codex isolation QA
+
+on:
+  push:
+    branches: [fix-openai-codex]
+  workflow_dispatch:
+
+jobs:
+  codex-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.20.0
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check extension types
+        run: pnpm --dir src exec tsc --noEmit
+      - name: Check agent runtime types
+        if: always()
+        run: pnpm --dir packages/agent-runtime exec tsc --noEmit
+      - name: Run Codex OAuth, provider, Task and fallback regressions
+        if: always()
+        run: |
+          pnpm --dir src exec vitest run \
+            integrations/openai-codex/__tests__/oauth-delegated.spec.ts \
+            integrations/openai-codex/__tests__/oauth-refresh-lock.process.spec.ts \
+            api/providers/__tests__/openai-codex-isolation-diagnostics.spec.ts \
+            api/providers/__tests__/openai-codex-native-tool-calls.spec.ts \
+            api/providers/__tests__/openai-codex-tool-history.spec.ts \
+            api/providers/__tests__/openai-codex-http-cancel.spec.ts \
+            api/providers/__tests__/virtual-quota-codex-retry.spec.ts \
+            core/task/__tests__/Task.spec.ts \
+            core/kilocode/agent-manager/__tests__/RuntimeProcessHandler.codex-ipc.spec.ts \
+            core/kilocode/agent-manager/__tests__/RuntimeProcessHandler.spec.ts
+      - name: Run real IPC child-process tests
+        if: always()
+        run: |
+          pnpm --dir packages/agent-runtime exec vitest run \
+            src/services/__tests__/codex-token-client.spec.ts \
+            src/services/__tests__/codex-token-client.process.spec.ts
+      - name: Diff whitespace check
+        if: always()
+        run: git diff --check HEAD~1 HEAD

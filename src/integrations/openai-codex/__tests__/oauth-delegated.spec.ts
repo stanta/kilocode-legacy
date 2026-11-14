@@ -96,4 +96,57 @@ describe("delegated child OAuth snapshots", () => {
 		}
 	})
 
+
+	it("forces a 401 refresh when an in-flight normal refresh left the rejected token unchanged", async () => {
+		const { mkdtemp, rm } = await import("node:fs/promises")
+		const { tmpdir } = await import("node:os")
+		const path = await import("node:path")
+		const directory = await mkdtemp(path.join(tmpdir(), "codex-oauth-forced-"))
+		let stored: string | undefined
+		const context = {
+			globalStorageUri: { fsPath: directory, scheme: "file" },
+			secrets: {
+				get: async () => stored,
+				store: async (_key: string, value: string) => { stored = value },
+				delete: async () => { stored = undefined },
+			},
+		} as unknown as ExtensionContext
+		const manager = new OpenAiCodexOAuthManager()
+		manager.initialize(context)
+		let release!: () => void
+		const gate = new Promise<void>((resolve) => { release = resolve })
+		const submitted: string[] = []
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, options) => {
+			const token = new URLSearchParams(String(options?.body)).get("refresh_token")!
+			submitted.push(token)
+			if (submitted.length === 1) {
+				await gate
+				return Response.json({ access_token: "rejected", refresh_token: "rotated", expires_in: 3600 })
+			}
+			return Response.json({ access_token: "accepted", refresh_token: "newest", expires_in: 3600 })
+		})
+		try {
+			await manager.saveCredentials({
+				type: "openai-codex", access_token: "rejected",
+				refresh_token: "initial", expires: Date.now() - 1000,
+			})
+			const ordinary = manager.getTokenSnapshot()
+			// Wait until the normal refresh has reached the endpoint.
+			for (let i = 0; i < 100 && submitted.length === 0; i++) {
+				await new Promise((resolve) => setTimeout(resolve, 10))
+			}
+			expect(submitted).toEqual(["initial"])
+			const forced = manager.forceRefreshTokenSnapshot("rejected")
+			release()
+			expect((await ordinary)?.accessToken).toBe("rejected")
+			expect((await forced)?.accessToken).toBe("accepted")
+			expect(submitted).toEqual(["initial", "rotated"])
+		} finally {
+			release?.()
+			fetchMock.mockRestore()
+			manager.dispose()
+			await rm(directory, { recursive: true, force: true })
+		}
+	})
+
 })

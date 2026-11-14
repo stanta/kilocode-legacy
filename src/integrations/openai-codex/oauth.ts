@@ -352,6 +352,7 @@ export class OpenAiCodexOAuthManager {
 	private credentials: OpenAiCodexCredentials | null = null
 	private logFn: ((message: string) => void) | null = null
 	private refreshPromise: Promise<OpenAiCodexCredentials | null> | null = null
+	private refreshRejectedToken: string | null = null
 	private secretSubscription?: { dispose(): void }
 	private cacheGeneration = 0
 	private authorizationGeneration = 0
@@ -476,38 +477,58 @@ export class OpenAiCodexOAuthManager {
 		})
 	}
 
+	private async refreshUnderLock(rejectedAccessToken?: string): Promise<OpenAiCodexCredentials | null> {
+		return withCodexOAuthLock(this.requireContext(), async (lockSignal) => {
+			// Always re-read while locked, including after waiting for another window.
+			const current = await this.readStoredCredentials()
+			if (!current) {
+				this.credentials = null
+				return null
+			}
+			if (rejectedAccessToken ? current.access_token !== rejectedAccessToken : !isTokenExpired(current)) {
+				this.credentials = current
+				return current
+			}
+			const refreshed = await refreshAccessToken(current, lockSignal)
+			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
+			const latest = await this.readStoredCredentials()
+			if (!latest || JSON.stringify(latest) !== JSON.stringify(current)) {
+				// Another writer (including an old extension version) superseded us.
+				this.credentials = latest
+				return latest
+			}
+			await this.writeUnlocked(refreshed)
+			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
+			return refreshed
+		})
+	}
+
 	private async runRefresh(rejectedAccessToken?: string): Promise<OpenAiCodexCredentials | null> {
-		// Local single-flight encompasses storage read, network refresh AND persistence.
-		if (!this.refreshPromise) {
-			const operation = withCodexOAuthLock(this.requireContext(), async (lockSignal) => {
-				// Another window may have refreshed or logged out while we waited.
-				const current = await this.readStoredCredentials()
-				if (!current) {
-					this.credentials = null
-					return null
-				}
-				if (rejectedAccessToken ? current.access_token !== rejectedAccessToken : !isTokenExpired(current)) {
-					this.credentials = current
-					return current
-				}
-				const refreshed = await refreshAccessToken(current, lockSignal)
-				if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
-				// Observe out-of-protocol writes (including older installed extension versions).
-				const latest = await this.readStoredCredentials()
-				if (!latest || JSON.stringify(latest) !== JSON.stringify(current)) {
-					this.credentials = latest
-					return latest
-				}
-				await this.writeUnlocked(refreshed)
-				if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
-				return refreshed
-			})
-			this.refreshPromise = operation
-			void operation.finally(() => {
-				if (this.refreshPromise === operation) this.refreshPromise = null
-			}).catch(() => {})
+		// A 401 can arrive while a normal refresh is in flight. If that refresh
+		// returns the SAME rejected access version, the forced caller must still
+		// perform its refresh. Do not refresh twice if the in-flight operation
+		// was already forced for this rejected version.
+		const existing = this.refreshPromise
+		if (existing) {
+			const activeRejectedToken = this.refreshRejectedToken
+			const result = await existing
+			if (rejectedAccessToken && result?.access_token === rejectedAccessToken &&
+				activeRejectedToken !== rejectedAccessToken) {
+				return this.refreshUnderLock(rejectedAccessToken)
+			}
+			return result
 		}
-		return this.refreshPromise
+
+		const operation = this.refreshUnderLock(rejectedAccessToken)
+		this.refreshPromise = operation
+		this.refreshRejectedToken = rejectedAccessToken ?? null
+		void operation.finally(() => {
+			if (this.refreshPromise === operation) {
+				this.refreshPromise = null
+				this.refreshRejectedToken = null
+			}
+		}).catch(() => {})
+		return operation
 	}
 
 	async getTokenSnapshot(signal?: AbortSignal): Promise<{ accessToken: string; accountId?: string } | null> {
