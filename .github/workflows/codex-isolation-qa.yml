@@ -58,3 +58,46 @@ jobs:
       - name: Diff whitespace check
         if: always()
         run: git diff --check HEAD~1 HEAD
+      - name: Temporary snapshot of Prettier-normalized files
+        if: always()
+        run: |
+          files=(
+            src/extension.ts
+            src/integrations/openai-codex/oauth.ts
+            src/integrations/openai-codex/oauth-refresh-lock.ts
+            src/integrations/openai-codex/__tests__/oauth-delegated.spec.ts
+            src/integrations/openai-codex/__tests__/oauth-refresh-lock.process.spec.ts
+            src/integrations/openai-codex/__tests__/oauth-refresh-lock.worker.ts
+            src/api/providers/openai-codex.ts
+            src/api/providers/virtual-quota-fallback.ts
+            src/api/index.ts
+            src/core/task/Task.ts
+            src/core/task/__tests__/Task.spec.ts
+            src/core/condense/index.ts
+            src/core/kilocode/agent-manager/RuntimeProcessHandler.ts
+            src/core/kilocode/agent-manager/AgentManagerProvider.ts
+            src/core/kilocode/agent-manager/__tests__/RuntimeProcessHandler.codex-ipc.spec.ts
+            src/core/kilocode/agent-manager/__tests__/RuntimeProcessHandler.spec.ts
+            src/api/providers/__tests__/openai-codex-isolation-diagnostics.spec.ts
+            src/api/providers/__tests__/openai-codex-native-tool-calls.spec.ts
+            src/api/providers/__tests__/openai-codex-tool-history.spec.ts
+            src/api/providers/__tests__/openai-codex-http-cancel.spec.ts
+            src/api/providers/__tests__/virtual-quota-codex-retry.spec.ts
+            packages/agent-runtime/src/process.ts
+            packages/agent-runtime/src/host/ExtensionHost.ts
+            packages/agent-runtime/src/services/codex-token-client.ts
+            packages/agent-runtime/src/services/__tests__/codex-token-client.spec.ts
+            packages/agent-runtime/src/services/__tests__/codex-token-client.process.spec.ts
+            packages/agent-runtime/src/services/__tests__/codex-token-client.worker.ts
+            docs/codex-oauth-isolation-rollout.md
+            .changeset/codex-oauth-request-isolation.md
+          )
+          pnpm exec prettier --write "${files[@]}" >/dev/null
+          for file in "${files[@]}"; do
+            if ! git diff --quiet -- "$file"; then
+              printf 'CODEX_FORMAT_BEGIN:%s\n' "$file"
+              base64 -w0 "$file" | fold -w 1200 | sed 's/^/CODEX_FORMAT_CHUNK:/'
+              printf 'CODEX_FORMAT_END:%s\n' "$file"
+            fi
+          done
+
