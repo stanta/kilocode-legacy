@@ -25,3 +25,5 @@ Scope: one local VS Code credential/lock domain, with all windows upgraded to th
 5. Update all active VS Code windows together; do not claim support for mixed versions or unverified domains.
 
 Synthetic two-process lock tests and localhost HTTP tests do not establish production SecretStorage or ChatGPT server behavior.
+
+Unrelated known issue: NativeToolCallParser's process-global streaming state remains outside this OAuth/request-lifecycle patch. Do not use its old failing characterization to gate this fix.

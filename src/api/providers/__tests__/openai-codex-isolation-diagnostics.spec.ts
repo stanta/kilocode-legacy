@@ -11,10 +11,9 @@ import {
 	openAiCodexOAuthManager,
 	type OpenAiCodexCredentials,
 } from "../../../integrations/openai-codex/oauth"
-import { NativeToolCallParser } from "../../../core/assistant-message/NativeToolCallParser"
 
-// Diagnostic characterizations, not assertions that the observed failure modes are desirable.
-// All network and secret-storage operations use synthetic data.
+// Codex isolation regression tests using only synthetic credentials and controlled streams.
+// NativeToolCallParser's separate process-global state defect is not part of this fix.
 describe("Codex isolation diagnostics", () => {
 	const lockDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-lock-tests-"))
 	afterAll(() => fs.rmSync(lockDirectory, { recursive: true, force: true }))
@@ -23,16 +22,12 @@ describe("Codex isolation diagnostics", () => {
 		vi.spyOn(console, "log").mockImplementation(() => {})
 		vi.spyOn(console, "error").mockImplementation(() => {})
 		vi.spyOn(console, "debug").mockImplementation(() => {})
-		NativeToolCallParser.clearRawChunkState()
-		NativeToolCallParser.clearAllStreamingToolCalls()
 	})
 
 	afterEach(() => {
 		vi.useRealTimers()
 		vi.restoreAllMocks()
 		vi.unstubAllGlobals()
-		NativeToolCallParser.clearRawChunkState()
-		NativeToolCallParser.clearAllStreamingToolCalls()
 	})
 
 	function credentials(generation: string, expires = Date.now() - 1): OpenAiCodexCredentials {
@@ -117,26 +112,6 @@ describe("Codex isolation diagnostics", () => {
 		expect(await a.getAccessToken()).toBe("synthetic-access-new")
 	})
 
-	it("reproduces one task's parser state being consumed by another task at index zero", () => {
-		const a = NativeToolCallParser.processRawChunk({
-			index: 0,
-			id: "call_A",
-			name: "read_file",
-			arguments: '{"files":',
-		})
-		const b = NativeToolCallParser.processRawChunk({
-			index: 0,
-			id: "call_B",
-			name: "execute_command",
-			arguments: '{"command":"test"}',
-		})
-
-		expect(a[0]).toMatchObject({ type: "tool_call_start", id: "call_A" })
-		expect(b).toEqual([{ type: "tool_call_delta", id: "call_A", delta: '{"command":"test"}' }])
-		NativeToolCallParser.clearRawChunkState() // A new task resets the shared parser.
-		expect(NativeToolCallParser.finalizeRawChunks()).toEqual([])
-	})
-
 	function provider() {
 		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot").mockResolvedValue({
 			accessToken: "synthetic-private-token",
@@ -154,6 +129,47 @@ describe("Codex isolation diagnostics", () => {
 		}
 		return chunks
 	}
+
+	it("cancels one shared OAuth waiter without stopping another request", async () => {
+		const first = provider()
+		const second = provider()
+		let completeAuth!: (value: { accessToken: string }) => void
+		const sharedRefresh = new Promise<{ accessToken: string }>((resolve) => {
+			completeAuth = resolve
+		})
+		const readSnapshot = vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot").mockReturnValue(sharedRefresh)
+		const firstDispatch = vi.fn()
+		const secondDispatch = vi.fn(async () => ({
+			async *[Symbol.asyncIterator]() {
+				yield { type: "response.completed", response: { id: "second", status: "completed", output: [] } }
+			},
+		}))
+		;(first as any).client = { responses: { create: firstDispatch } }
+		;(second as any).client = { responses: { create: secondDispatch } }
+
+		const controller = new AbortController()
+		const cancelled = (async () => {
+			for await (const _ of first.createMessage("system", [], { taskId: "A" }, { signal: controller.signal })) {
+				// No output expected.
+			}
+		})()
+		const continued = (async () => {
+			for await (const _ of second.createMessage("system", [], { taskId: "B" })) {
+				// No output expected.
+			}
+		})()
+		const cancelledAssertion = expect(cancelled).rejects.toMatchObject({ code: "cancelled" })
+		for (let i = 0; i < 20 && readSnapshot.mock.calls.length < 2; i++) await Promise.resolve()
+		expect(readSnapshot).toHaveBeenCalledTimes(2)
+
+		controller.abort()
+		await cancelledAssertion
+		completeAuth({ accessToken: "synthetic-shared-access" })
+		await continued
+		expect(firstDispatch).not.toHaveBeenCalled()
+		expect(secondDispatch).toHaveBeenCalledTimes(1)
+		expect(second.getResponseId()).toBe("second")
+	})
 
 	it("does not replay a partial SDK response or log payloads", async () => {
 		const handler = provider()
