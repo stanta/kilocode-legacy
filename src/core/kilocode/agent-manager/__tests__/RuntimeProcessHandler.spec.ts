@@ -52,6 +52,23 @@ describe("RuntimeProcessHandler model isolation", () => {
 		expect(baseline.kilocodeModel).toBe("baseline")
 	})
 
+	it("authorizes trusted virtual-quota-fallback children to request Codex snapshots without copying secrets", () => {
+		const handler = new RuntimeProcessHandler(new AgentRegistry(), callbacks, "/extension")
+		handler.spawnProcess("", "/workspace", "fallback", {
+			apiConfiguration: { apiProvider: "virtual-quota-fallback" },
+			secrets: {
+				"openai-codex-oauth-credentials": "PRIVATE_REFRESH_TOKEN",
+				"other-service-key": "synthetic-test-secret",
+			},
+		}, vi.fn())
+		const child = vi.mocked(fork).mock.results[0]?.value
+		expect((handler as any).codexChildren.has(child)).toBe(true)
+		const rawConfig = (vi.mocked(fork).mock.calls[0][2] as any).env.AGENT_CONFIG
+		expect(rawConfig).not.toContain("PRIVATE_REFRESH_TOKEN")
+		const config = JSON.parse(rawConfig)
+		expect(config.secrets).toEqual({ "other-service-key": "synthetic-test-secret" })
+	})
+
 	it("maps an OpenRouter override to its provider-specific field", () => {
 		const handler = new RuntimeProcessHandler(new AgentRegistry(), callbacks, "/extension")
 		handler.spawnProcess(

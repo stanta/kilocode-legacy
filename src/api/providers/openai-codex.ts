@@ -72,6 +72,15 @@ class CodexRequestError extends Error {
 	}
 }
 
+function codexAuthorizationError(error: unknown): CodexRequestError {
+	const status = typeof (error as any)?.status === "number" ? (error as any).status : undefined
+	return new CodexRequestError(
+		status ? "Codex authorization failed (HTTP " + status + ")" : "Codex authorization unavailable",
+		"auth",
+		status,
+	)
+}
+
 function codexAbortReason(signal: AbortSignal): Error {
 	return signal.reason instanceof Error ? signal.reason : new CodexRequestError("Codex request cancelled", "cancelled")
 }
@@ -243,7 +252,13 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		diagnostic?: (phase: string, details?: Record<string, number | boolean>) => void,
 	): ApiStream {
 		diagnostic?.("auth.start")
-		let snapshot = await awaitCodexAuth(openAiCodexOAuthManager.getTokenSnapshot(signal), signal)
+		let snapshot: Awaited<ReturnType<typeof openAiCodexOAuthManager.getTokenSnapshot>>
+		try {
+			snapshot = await awaitCodexAuth(openAiCodexOAuthManager.getTokenSnapshot(signal), signal)
+		} catch (error) {
+			if (signal.aborted) throw codexAbortReason(signal)
+			throw codexAuthorizationError(error)
+		}
 		diagnostic?.("auth.end", { authenticated: !!snapshot })
 		if (!snapshot) throw new CodexRequestError("Sign in to OpenAI Codex to continue", "auth")
 		const formattedInput = this.formatFullConversation(systemPrompt, messages, metadata?.taskId)
@@ -260,10 +275,16 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 					error.status !== 401 || state.eventsSeen || attempt !== 0) throw error
 
 				diagnostic?.("auth.refresh.start")
-				const refreshed = await awaitCodexAuth(
-					openAiCodexOAuthManager.forceRefreshTokenSnapshot(snapshot.accessToken, signal),
-					signal,
-				)
+				let refreshed: Awaited<ReturnType<typeof openAiCodexOAuthManager.forceRefreshTokenSnapshot>>
+				try {
+					refreshed = await awaitCodexAuth(
+						openAiCodexOAuthManager.forceRefreshTokenSnapshot(snapshot.accessToken, signal),
+						signal,
+					)
+				} catch (error) {
+					if (signal.aborted) throw codexAbortReason(signal)
+					throw codexAuthorizationError(error)
+				}
 				diagnostic?.("auth.refresh.end", { authenticated: !!refreshed })
 				if (!refreshed) throw new CodexRequestError("Sign in to OpenAI Codex to continue", "auth", 401)
 				if (refreshed.accountId !== snapshot.accountId) {

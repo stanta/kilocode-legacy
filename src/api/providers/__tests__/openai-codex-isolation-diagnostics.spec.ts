@@ -233,7 +233,9 @@ describe("Codex isolation diagnostics", () => {
 		const handler = provider()
 		vi.mocked(openAiCodexOAuthManager.getTokenSnapshot).mockRejectedValue(new Error("PRIVATE AUTH ERROR"))
 
-		await expect(consume(handler, "task-auth-failed")).rejects.toThrow("PRIVATE AUTH ERROR")
+		await expect(consume(handler, "task-auth-failed")).rejects.toMatchObject({
+			codexRequest: true, code: "auth", safeToRetry: false,
+		})
 
 		const records = vi.mocked(console.info).mock.calls.map((call) => call[1] as Record<string, unknown>)
 		expect(records.map((record) => record.phase)).toEqual([

@@ -406,7 +406,8 @@ export class RuntimeProcessHandler {
 			})
 
 			// Only children launched for Codex may obtain a parent-owned token snapshot.
-			if (options?.apiConfiguration?.apiProvider === "openai-codex") {
+			if (options?.apiConfiguration?.apiProvider === "openai-codex" ||
+				options?.apiConfiguration?.apiProvider === "virtual-quota-fallback") {
 				this.codexChildren.add(proc)
 			}
 			// Store pending process info

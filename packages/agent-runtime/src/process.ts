@@ -47,7 +47,7 @@
  */
 
 import { createExtensionService, type ExtensionService } from "./services/extension.js"
-import { randomUUID } from "node:crypto"
+import { createCodexTokenClient } from "./services/codex-token-client.js"
 import { logs, setLogger, createIPCLogger } from "./utils/logger.js"
 import type { ExtensionMessage, WebviewMessage, ExtensionState, ModeConfig, ProviderSettings } from "./types/index.js"
 
@@ -268,42 +268,9 @@ async function main(): Promise<void> {
 
 	let agent: ExtensionService | null = null
 
-	type CodexSnapshot = { accessToken: string; accountId?: string } | null
-	const pendingCodexTokens = new Map<string, {
-		resolve: (snapshot: CodexSnapshot) => void
-		reject: (error: Error) => void
-	}>()
-	const requestCodexSnapshot = (rejectedAccessToken?: string, signal?: AbortSignal): Promise<CodexSnapshot> => {
-		if (!process.send || !process.connected) {
-			return Promise.reject(new Error("Codex token parent is unavailable"))
-		}
-		if (signal?.aborted) return Promise.reject(new Error("Codex token request cancelled"))
-		return new Promise<CodexSnapshot>((resolve, reject) => {
-			const requestId = randomUUID()
-			const cleanup = () => {
-				clearTimeout(timer)
-				signal?.removeEventListener("abort", onAbort)
-				pendingCodexTokens.delete(requestId)
-			}
-			const finish = {
-				resolve: (snapshot: CodexSnapshot) => { cleanup(); resolve(snapshot) },
-				reject: (error: Error) => { cleanup(); reject(error) },
-			}
-			const onAbort = () => finish.reject(new Error("Codex token request cancelled"))
-			const timer = setTimeout(() => finish.reject(new Error("Codex token parent timed out")), 60_000)
-			timer.unref?.()
-			pendingCodexTokens.set(requestId, finish)
-			signal?.addEventListener("abort", onAbort, { once: true })
-			// The rejected version is used for a safe, single 401 refresh.
-			// Do not send refresh tokens or log this message's contents.
-			sendToParent({ type: "codexTokenRequest", requestId, rejectedAccessToken })
-		})
-	}
-	process.on("disconnect", () => {
-		for (const pending of [...pendingCodexTokens.values()]) {
-			pending.reject(new Error("Codex token parent disconnected"))
-		}
-	})
+	const codexTokens = createCodexTokenClient((message) => sendToParent(message))
+	process.on("disconnect", codexTokens.disconnect)
+	const requestCodexSnapshot = codexTokens.request
 
 	try {
 		// Create extension service with configuration
@@ -328,7 +295,8 @@ async function main(): Promise<void> {
 			// Inject provider configuration
 			try {
 				const extensionHost = agent!.getExtensionHost()
-				if (config.providerSettings.apiProvider === "openai-codex") {
+				if (config.providerSettings.apiProvider === "openai-codex" ||
+					config.providerSettings.apiProvider === "virtual-quota-fallback") {
 					extensionHost.setCodexTokenProvider(requestCodexSnapshot)
 				}
 				const stateConfig: Partial<ExtensionState> = {
@@ -439,23 +407,10 @@ async function main(): Promise<void> {
 			})
 		})
 
-		// Initialize the agent (with optional resume data for pre-seeding)
-		await agent.initialize(config.resumeData)
-
+		// Set up IPC before initialize(): auth replies can arrive while ready handlers run.
 		// Set up message handler from parent
 		process.on("message", async (msg: ParentMessage) => {
-			if (msg.type === "codexTokenResponse") {
-				const pending = msg.requestId && pendingCodexTokens.get(msg.requestId)
-				if (pending) {
-					if (msg.error) {
-						pending.reject(new Error("Codex token parent failed (" + msg.error.code +
-							(msg.error.status ? ", HTTP " + msg.error.status : "") + ")"))
-					} else {
-						pending.resolve(msg.snapshot ?? null)
-					}
-				}
-				return // Do not log token/account response payloads.
-			}
+			if (codexTokens.receive(msg)) return // Do not log token/account response payloads.
 			// Log incoming message from parent
 			const payloadType = (msg.payload as { type?: string } | undefined)?.type || ""
 			const payloadText = (msg.payload as { text?: string } | undefined)?.text?.slice(0, 50) || ""
@@ -574,6 +529,9 @@ async function main(): Promise<void> {
 			}
 			process.exit(0)
 		})
+
+		// Initialize after listeners so early auth requests cannot lose their replies.
+		await agent.initialize(config.resumeData)
 	} catch (error) {
 		logs.error("Failed to start agent", "AgentProcess", { error })
 		sendToParent({
