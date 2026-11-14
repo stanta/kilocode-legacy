@@ -54,7 +54,7 @@ jobs:
       - name: Lint changed agent runtime implementation
         if: always()
         run: |
-          pnpm --dir packages/agent-runtime exec eslint             src/process.ts             src/services/codex-token-client.ts
+          pnpm --dir packages/agent-runtime exec eslint --config ../../src/eslint.config.mjs src/process.ts src/services/codex-token-client.ts
       - name: Diff whitespace check
         if: always()
         run: git diff --check HEAD~1 HEAD

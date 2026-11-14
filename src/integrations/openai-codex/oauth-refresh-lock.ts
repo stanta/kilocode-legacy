@@ -52,22 +52,27 @@ export async function withCodexOAuthLock<T>(
 			controller.abort(new Error("OpenAI Codex OAuth lock was lost"))
 		},
 	})
+	let result!: T
+	let actionFailed = false
 	let actionError: unknown
+	let releaseError: unknown
 	try {
 		if (compromised) throw new Error("OpenAI Codex OAuth lock was lost")
-		const result = await action(controller.signal)
+		result = await action(controller.signal)
 		if (compromised) throw new Error("OpenAI Codex OAuth lock was lost")
-		return result
 	} catch (error) {
+		actionFailed = true
 		actionError = error
-		throw error
 	} finally {
 		controller.abort()
 		try {
 			await release()
 		} catch (error) {
-			// Release errors must not hide the failed refresh or the compromised lock.
-			if (!actionError && !compromised) throw error
+			releaseError = error
 		}
 	}
+	if (actionFailed) throw actionError
+	if (compromised) throw new Error("OpenAI Codex OAuth lock was lost")
+	if (releaseError) throw releaseError
+	return result
 }
