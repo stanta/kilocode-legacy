@@ -1,3 +1,4 @@
+import { describe, it, expect } from "vitest"
 import { createCodexTokenClient } from "../codex-token-client.js"
 
 describe("Codex child token IPC client", () => {

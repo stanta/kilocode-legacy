@@ -1,5 +1,6 @@
 import { createServer, type ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"
+import nock from "nock"
 
 import { OpenAiCodexHandler } from "../openai-codex"
 import { openAiCodexOAuthManager } from "../../../integrations/openai-codex/oauth"
@@ -15,6 +16,8 @@ function bounded<T>(task: Promise<T>, timeoutMs = 8_000): Promise<T> {
 }
 
 describe("Codex real HTTP cancellation and SSE lifecycle", () => {
+	beforeAll(() => nock.enableNetConnect("127.0.0.1"))
+	afterAll(() => nock.disableNetConnect())
 	afterEach(() => {
 		vi.restoreAllMocks()
 		vi.unstubAllGlobals()

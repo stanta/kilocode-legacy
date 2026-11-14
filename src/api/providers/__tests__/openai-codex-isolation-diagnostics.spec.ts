@@ -171,7 +171,7 @@ describe("Codex isolation diagnostics", () => {
 		const fetchMock = vi.fn(async () => new Response(events))
 		vi.stubGlobal("fetch", fetchMock)
 
-		const chunks = []
+		const chunks: unknown[] = []
 		await expect(async () => {
 			for await (const chunk of handler.createMessage("PRIVATE PROMPT", [{ role: "user", content: "PRIVATE TEXT" }], {
 				taskId: "task-replay",
@@ -325,8 +325,9 @@ describe("Codex isolation diagnostics", () => {
 				signal: controller.signal, deadlineAt: Date.now() + 250,
 			})) { /* no content expected */ }
 		})()
+		const assertion = expect(running).rejects.toThrow(/deadline exceeded/)
 		await vi.advanceTimersByTimeAsync(300)
-		await expect(running).rejects.toThrow(/deadline exceeded/)
+		await assertion
 		expect(create).toHaveBeenCalledTimes(1)
 	})
 

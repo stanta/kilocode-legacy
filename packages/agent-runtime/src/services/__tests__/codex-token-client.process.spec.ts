@@ -1,3 +1,4 @@
+import { describe, it, expect } from "vitest"
 import { fork, type ChildProcess } from "node:child_process"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import * as path from "node:path"
