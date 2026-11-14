@@ -180,4 +180,93 @@ describe("delegated child OAuth snapshots", () => {
 			await rm(directory, { recursive: true, force: true })
 		}
 	})
+
+	it("quarantines a delayed SecretStorage write when its lock is lost", async () => {
+		const { existsSync } = await import("node:fs")
+		const { mkdtemp, rm } = await import("node:fs/promises")
+		const { tmpdir } = await import("node:os")
+		const path = await import("node:path")
+		const { withCodexOAuthLock } = await import("../oauth-refresh-lock")
+		const directory = await mkdtemp(path.join(tmpdir(), "codex-oauth-fence-"))
+		let stored: string | undefined
+		let releaseWrite!: () => void
+		let enteredWrite!: () => void
+		const entered = new Promise<void>((resolve) => { enteredWrite = resolve })
+		const blocked = new Promise<void>((resolve) => { releaseWrite = resolve })
+		const context = {
+			globalStorageUri: { fsPath: directory, scheme: "file" },
+			secrets: {
+				get: async () => stored,
+				store: async (_key: string, value: string) => {
+					enteredWrite()
+					await blocked
+					stored = value
+				},
+				delete: async () => { stored = undefined },
+			},
+		} as unknown as ExtensionContext
+		const writer = new OpenAiCodexOAuthManager()
+		writer.initialize(context)
+		let first: Promise<void> | undefined
+		try {
+			first = writer.saveCredentials({
+				type: "openai-codex",
+				access_token: "synthetic-old",
+				refresh_token: "synthetic-old-refresh",
+				expires: Date.now() + 3600_000,
+			})
+			await entered
+			// The marker is non-secret and exists *before* the unabortable async storage write.
+			const pendingPath = path.join(directory, ".openai-codex-secret-write-pending")
+			expect(existsSync(pendingPath)).toBe(true)
+
+			// Simulate a stale lock being removed by another process while the write is blocked.
+			await rm(path.join(directory, ".openai-codex-oauth.lock"), { recursive: true, force: true })
+			const competing = withCodexOAuthLock(context, async () => {
+				throw new Error("A competing writer must never enter while the first write is pending")
+			})
+			await expect(competing).rejects.toThrow(/pending|uncertain|recovery/i)
+		} finally {
+			releaseWrite?.()
+			await first?.catch(() => {})
+			writer.dispose()
+			await rm(directory, { recursive: true, force: true })
+		}
+	})
+
+	it("blocks a subsequent credential read after an interrupted storage commit", async () => {
+		const { existsSync } = await import("node:fs")
+		const { mkdtemp, rm } = await import("node:fs/promises")
+		const { tmpdir } = await import("node:os")
+		const path = await import("node:path")
+		const directory = await mkdtemp(path.join(tmpdir(), "codex-oauth-uncertain-"))
+		let stored: string | undefined
+		const context = {
+			globalStorageUri: { fsPath: directory, scheme: "file" },
+			secrets: {
+				get: async () => stored,
+				store: async (_key: string, value: string) => {
+					stored = value
+					throw new Error("Commit acknowledgement lost")
+				},
+				delete: async () => { stored = undefined },
+			},
+		} as unknown as ExtensionContext
+		const writer = new OpenAiCodexOAuthManager()
+		writer.initialize(context)
+		try {
+			await expect(writer.saveCredentials({
+				type: "openai-codex",
+				access_token: "synthetic-uncertain",
+				refresh_token: "synthetic-uncertain-refresh",
+				expires: Date.now() + 3600_000,
+			})).rejects.toThrow(/acknowledgement lost/)
+			expect(existsSync(path.join(directory, ".openai-codex-secret-write-pending"))).toBe(true)
+			await expect(writer.getTokenSnapshot()).rejects.toThrow(/uncertain|recovery|pending/i)
+		} finally {
+			writer.dispose()
+			await rm(directory, { recursive: true, force: true })
+		}
+	})
+
 })

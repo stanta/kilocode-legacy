@@ -1017,6 +1017,36 @@ describe("Cline", () => {
 				expect(backoffSpy).not.toHaveBeenCalled()
 			})
 
+			it.each([
+				{ name: "task aborted", taskAborted: true },
+				{ name: "request cancellation during preparation", taskAborted: false },
+			])("refuses HTTP dispatch after $name", async ({ taskAborted }) => {
+				const config = { ...mockApiConfig, apiProvider: "openai-codex" as const }
+				const task = new Task({
+					provider: mockProvider,
+					apiConfiguration: config,
+					task: "cancel before dispatch",
+					startTask: false,
+					context: mockExtensionContext,
+				})
+				let unblockState!: (state: any) => void
+				let reachedState!: () => void
+				const waitingForState = new Promise<void>((resolve) => { reachedState = resolve })
+				mockProvider.getState = vi.fn().mockImplementation(() => {
+					reachedState()
+					return new Promise((resolve) => { unblockState = resolve })
+				})
+				const createMessage = vi.spyOn(task.api, "createMessage")
+				const pending = task.attemptApiRequest(0, { skipProviderRateLimit: true }).next()
+				await waitingForState
+				if (taskAborted) task.abort = true
+				task.cancelCurrentRequest()
+				unblockState({ apiConfiguration: config, mode: "code" })
+				await expect(pending).rejects.toThrow(/cancelled before dispatch/)
+				expect(createMessage).not.toHaveBeenCalled()
+				expect(task.currentRequestAbortController).toBeUndefined()
+			})
+
 			it("retries an explicit pre-response Codex 429 only after closing the previous iterator", async () => {
 				const codex = {
 					...mockApiConfig,
