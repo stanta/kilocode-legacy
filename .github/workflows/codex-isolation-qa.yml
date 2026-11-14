@@ -47,6 +47,14 @@ jobs:
           pnpm --dir packages/agent-runtime exec vitest run \
             src/services/__tests__/codex-token-client.spec.ts \
             src/services/__tests__/codex-token-client.process.spec.ts
+      - name: Lint changed extension implementation
+        if: always()
+        run: |
+          pnpm --dir src exec eslint             integrations/openai-codex/oauth.ts             integrations/openai-codex/oauth-refresh-lock.ts             api/providers/openai-codex.ts             api/providers/virtual-quota-fallback.ts             api/index.ts             core/condense/index.ts             core/task/Task.ts             core/kilocode/agent-manager/RuntimeProcessHandler.ts             core/kilocode/agent-manager/AgentManagerProvider.ts
+      - name: Lint changed agent runtime implementation
+        if: always()
+        run: |
+          pnpm --dir packages/agent-runtime exec eslint             src/process.ts             src/services/codex-token-client.ts
       - name: Diff whitespace check
         if: always()
         run: git diff --check HEAD~1 HEAD
