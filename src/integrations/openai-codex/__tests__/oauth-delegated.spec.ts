@@ -234,6 +234,36 @@ describe("delegated child OAuth snapshots", () => {
 		}
 	})
 
+	it("keeps the non-secret quarantine marker when lock ownership is lost mid-write", async () => {
+		const { existsSync } = await import("node:fs")
+		const { mkdtemp, rm } = await import("node:fs/promises")
+		const { tmpdir } = await import("node:os")
+		const path = await import("node:path")
+		const { writeCodexSecretUnderLock, withCodexOAuthLock } = await import("../oauth-refresh-lock")
+		const directory = await mkdtemp(path.join(tmpdir(), "codex-lock-compromised-"))
+		const context = { globalStorageUri: { fsPath: directory, scheme: "file" } } as unknown as ExtensionContext
+		const owner = new AbortController()
+		let entered!: () => void
+		let complete!: () => void
+		const started = new Promise<void>((resolve) => { entered = resolve })
+		const gate = new Promise<void>((resolve) => { complete = resolve })
+		try {
+			const commit = writeCodexSecretUnderLock(context, owner.signal, async () => {
+				entered()
+				await gate // Simulate an unabortable VS Code SecretStorage write.
+			})
+			await started
+			owner.abort(new Error("lock was stolen"))
+			complete()
+			await expect(commit).rejects.toThrow(/lock lost/)
+			expect(existsSync(path.join(directory, ".openai-codex-secret-write-pending"))).toBe(true)
+			await expect(withCodexOAuthLock(context, async () => {})).rejects.toThrow(/pending|uncertain/i)
+		} finally {
+			complete?.()
+			await rm(directory, { recursive: true, force: true })
+		}
+	})
+
 	it("blocks a subsequent credential read after an interrupted storage commit", async () => {
 		const { existsSync } = await import("node:fs")
 		const { mkdtemp, rm } = await import("node:fs/promises")
