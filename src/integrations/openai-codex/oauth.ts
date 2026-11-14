@@ -3,7 +3,14 @@ import * as http from "http"
 import { URL } from "url"
 import type { ExtensionContext } from "vscode"
 import { z } from "zod"
-import { withCodexOAuthLock, getCodexCredentialEpoch, advanceCodexCredentialEpoch } from "./oauth-refresh-lock"
+import {
+	withCodexOAuthLock,
+	getCodexCredentialEpoch,
+	advanceCodexCredentialEpoch,
+	assertCodexSecretStorageSafe,
+	writeCodexSecretUnderLock,
+	CodexOAuthStorageUncertainError,
+} from "./oauth-refresh-lock"
 
 /**
  * OpenAI Codex OAuth Configuration
@@ -420,12 +427,18 @@ export class OpenAiCodexOAuthManager {
 	}
 
 	private async readStoredCredentials(): Promise<OpenAiCodexCredentials | null> {
-		const raw = await this.requireContext().secrets.get(OPENAI_CODEX_CREDENTIALS_KEY)
+		const context = this.requireContext()
+		assertCodexSecretStorageSafe(context)
+		const raw = await context.secrets.get(OPENAI_CODEX_CREDENTIALS_KEY)
+		assertCodexSecretStorageSafe(context)
 		return raw ? openAiCodexCredentialsSchema.parse(JSON.parse(raw)) : null
 	}
 
-	private async writeUnlocked(credentials: OpenAiCodexCredentials): Promise<void> {
-		await this.requireContext().secrets.store(OPENAI_CODEX_CREDENTIALS_KEY, JSON.stringify(credentials))
+	private async writeUnlocked(credentials: OpenAiCodexCredentials, lockSignal: AbortSignal): Promise<void> {
+		const context = this.requireContext()
+		await writeCodexSecretUnderLock(context, lockSignal, () =>
+			context.secrets.store(OPENAI_CODEX_CREDENTIALS_KEY, JSON.stringify(credentials)),
+		)
 		this.credentials = credentials
 		this.cacheGeneration++
 	}
@@ -439,7 +452,8 @@ export class OpenAiCodexOAuthManager {
 				if (generation !== this.cacheGeneration) continue
 				this.credentials = current
 				return current
-			} catch {
+			} catch (error) {
+				if (error instanceof CodexOAuthStorageUncertainError) throw error
 				if (generation !== this.cacheGeneration) continue
 				this.credentials = null
 				return null
@@ -460,7 +474,7 @@ export class OpenAiCodexOAuthManager {
 			}
 			await advanceCodexCredentialEpoch(context)
 			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
-			await this.writeUnlocked(validated)
+			await this.writeUnlocked(validated, lockSignal)
 		})
 	}
 
@@ -473,7 +487,9 @@ export class OpenAiCodexOAuthManager {
 			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
 			await advanceCodexCredentialEpoch(context)
 			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
-			await context.secrets.delete(OPENAI_CODEX_CREDENTIALS_KEY)
+			await writeCodexSecretUnderLock(context, lockSignal, () =>
+				context.secrets.delete(OPENAI_CODEX_CREDENTIALS_KEY),
+			)
 			this.credentials = null
 			this.cacheGeneration++
 		})
@@ -499,7 +515,7 @@ export class OpenAiCodexOAuthManager {
 				this.credentials = latest
 				return latest
 			}
-			await this.writeUnlocked(refreshed)
+			await this.writeUnlocked(refreshed, lockSignal)
 			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
 			return refreshed
 		})

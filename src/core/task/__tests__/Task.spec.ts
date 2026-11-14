@@ -1029,19 +1029,13 @@ describe("Cline", () => {
 					startTask: false,
 					context: mockExtensionContext,
 				})
-				let unblockState!: (state: any) => void
-				let reachedState!: () => void
-				const waitingForState = new Promise<void>((resolve) => { reachedState = resolve })
-				mockProvider.getState = vi.fn().mockImplementation(() => {
-					reachedState()
-					return new Promise((resolve) => { unblockState = resolve })
-				})
 				const createMessage = vi.spyOn(task.api, "createMessage")
 				const pending = task.attemptApiRequest(0, { skipProviderRateLimit: true }).next()
-				await waitingForState
+				// The first awaited provider state read yields while the controller is absent.
+				await Promise.resolve()
+				expect(task.currentRequestAbortController).toBeUndefined()
 				if (taskAborted) task.abort = true
 				task.cancelCurrentRequest()
-				unblockState({ apiConfiguration: config, mode: "code" })
 				await expect(pending).rejects.toThrow(/cancelled before dispatch/)
 				expect(createMessage).not.toHaveBeenCalled()
 				expect(task.currentRequestAbortController).toBeUndefined()

@@ -15,6 +15,8 @@ Scope: one local VS Code credential/lock domain, with all windows upgraded to th
 - Parent/child IPC shares only an access-token and account-ID snapshot. No refresh token is passed through environment, on-disk config or IPC.
 - The lock key uses the current extension globalStorageUri. Before release, manually establish that all windows intended to share a credential store also share the same lock directory, including any VS Code profiles being supported; verify SecretStorage reads genuinely observe another process's completed writes. If not, do not enable cross-profile guarantees; choose a single credential owner instead.
 - Stale-lock recovery is not distributed exactly-once OAuth. Server rotation followed by a crash before persistence can require explicit login.
+- A non-secret `.openai-codex-secret-write-pending` marker prevents another participating window from committing credentials while a prior asynchronous SecretStorage write is still unresolved. If persistence fails ambiguously, or the lock is compromised during a write, the marker remains and reads/writes fail closed. **SecretStorage does not support cancelling an already dispatched write or transactional CAS.** Do not claim such guarantees for old extension versions or unshared lock domains.
+- Recovery from a persistent pending-write marker: first close **all** windows/processes in that credential domain and ensure no SecretStorage operation can still be running. Remove only the non-secret pending marker from that extension profile's globalStorageUri, restart the updated extension, explicitly sign out and sign back in. Never remove the marker while another window is active; do not copy or inspect production tokens in diagnostics.
 
 ## Verification gates
 

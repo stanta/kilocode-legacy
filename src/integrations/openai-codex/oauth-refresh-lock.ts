@@ -1,5 +1,5 @@
 import * as fs from "fs/promises"
-import { readFileSync } from "fs"
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from "fs"
 import { randomUUID } from "crypto"
 import * as path from "path"
 import * as lockfile from "proper-lockfile"
@@ -13,6 +13,53 @@ import type { ExtensionContext } from "vscode"
  * profiles and remote extension hosts are separate, unverified domains.
  */
 const CREDENTIAL_EPOCH_FILE = ".openai-codex-session-epoch"
+const PENDING_SECRET_WRITE_FILE = ".openai-codex-secret-write-pending"
+
+export class CodexOAuthStorageUncertainError extends Error {
+	constructor() {
+		super("Codex OAuth SecretStorage write is pending or uncertain; close all VS Code windows before recovery")
+		this.name = "CodexOAuthStorageUncertainError"
+	}
+}
+
+export function assertCodexSecretStorageSafe(context: Pick<ExtensionContext, "globalStorageUri">): void {
+	const directory = context.globalStorageUri?.fsPath
+	if (!directory) throw new CodexOAuthStorageUncertainError()
+	if (existsSync(path.join(directory, PENDING_SECRET_WRITE_FILE))) {
+		throw new CodexOAuthStorageUncertainError()
+	}
+}
+
+/**
+ * SecretStorage writes cannot be aborted once dispatched. Write a non-secret
+ * pending marker synchronously *before* beginning the async operation.
+ * A recovered/stolen lock cannot start a competing credential operation while
+ * this write is pending. On loss of ownership or ambiguous failure the marker
+ * stays in place and the credential domain fails closed until manual recovery.
+ */
+export async function writeCodexSecretUnderLock(
+	context: Pick<ExtensionContext, "globalStorageUri">,
+	lockSignal: AbortSignal,
+	write: () => Promise<void>,
+): Promise<void> {
+	assertCodexSecretStorageSafe(context)
+	if (lockSignal.aborted) throw new Error("Codex OAuth lock lost before SecretStorage write")
+	const marker = path.join(context.globalStorageUri.fsPath, PENDING_SECRET_WRITE_FILE)
+	// Atomic exclusive creation, no access or refresh token (or account ID) on disk.
+	writeFileSync(marker, "pending\n", { flag: "wx", mode: 0o600 })
+	let acknowledged = false
+	try {
+		if (lockSignal.aborted) throw new Error("Codex OAuth lock lost during SecretStorage write")
+		await write()
+		if (lockSignal.aborted) throw new Error("Codex OAuth lock lost during SecretStorage write")
+		acknowledged = true
+	} finally {
+		// Deleting the marker after a failed/compromised write could allow another
+		// writer to race an operation whose persistence status is unknown.
+		if (acknowledged) unlinkSync(marker)
+	}
+}
+
 
 /** Non-secret generation, shared by collaborating windows in the same credential domain. */
 export function getCodexCredentialEpoch(context: Pick<ExtensionContext, "globalStorageUri">): string {
@@ -58,6 +105,7 @@ export async function withCodexOAuthLock<T>(
 	let releaseError: unknown
 	try {
 		if (compromised) throw new Error("OpenAI Codex OAuth lock was lost")
+		assertCodexSecretStorageSafe(context)
 		result = await action(controller.signal)
 		if (compromised) throw new Error("OpenAI Codex OAuth lock was lost")
 	} catch (error) {

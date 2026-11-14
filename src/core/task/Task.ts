@@ -353,6 +353,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private readonly globalStoragePath: string
 	abort: boolean = false
 	currentRequestAbortController?: AbortController
+	// Changed even when cancelCurrentRequest() runs before the HTTP controller exists.
+	private requestCancellationGeneration = 0
 	private condenseAbortController?: AbortController
 	skipPrevResponseIdOnce: boolean = false
 
@@ -2817,6 +2819,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 * This immediately aborts the underlying stream rather than waiting for the next chunk.
 	 */
 	public cancelCurrentRequest(): void {
+		this.requestCancellationGeneration++
 		if (this.currentRequestAbortController) {
 			console.log(`[Task#${this.taskId}.${this.instanceId}] Aborting current HTTP request`)
 			this.currentRequestAbortController.abort()
@@ -4904,6 +4907,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		} = {},
 	): ApiStream {
 		// kilocode_change end
+		const cancellationGeneration = this.requestCancellationGeneration
+		const refuseCancelledDispatch = () => {
+			if (this.abort || this.abandoned || cancellationGeneration !== this.requestCancellationGeneration) {
+				throw Object.assign(new Error("Request cancelled before dispatch"), {
+					codexRequest: true,
+					code: "cancelled",
+					safeToRetry: false,
+				})
+			}
+		}
 		const state = await this.providerRef.deref()?.getState()
 		const apiConfiguration = this.getSessionApiConfiguration()
 		// Preserve a single finite deadline across all Task-owned Codex auto-retries.
@@ -5243,6 +5256,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			...(this.parentTaskId ? { feature: "parallel-agent" } : {}),
 		}
 
+		// Task cancellation may have happened during any async preparation above.
+		refuseCancelledDispatch()
 		// Create an AbortController to allow cancelling the request mid-stream
 		this.currentRequestAbortController = new AbortController()
 		const requestController = this.currentRequestAbortController
@@ -5271,6 +5286,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 		// kilocode_change end
 
+		// A cancellation during the last preparation step must not dispatch the HTTP request.
+		try {
+			refuseCancelledDispatch()
+		} catch (error) {
+			requestController.abort()
+			if (this.currentRequestAbortController === requestController) {
+				this.currentRequestAbortController = undefined
+			}
+			throw error
+		}
 		// The provider accepts reasoning items alongside standard messages; cast to the expected parameter type.
 		const stream = this.api.createMessage(
 			systemPrompt,
