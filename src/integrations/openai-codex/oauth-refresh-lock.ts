@@ -40,7 +40,7 @@ export function assertCodexSecretStorageSafe(context: Pick<ExtensionContext, "gl
 export async function writeCodexSecretUnderLock(
 	context: Pick<ExtensionContext, "globalStorageUri">,
 	lockSignal: AbortSignal,
-	write: () => Promise<void>,
+	write: () => PromiseLike<void>,
 ): Promise<void> {
 	assertCodexSecretStorageSafe(context)
 	if (lockSignal.aborted) throw new Error("Codex OAuth lock lost before SecretStorage write")
@@ -59,7 +59,6 @@ export async function writeCodexSecretUnderLock(
 		if (acknowledged) unlinkSync(marker)
 	}
 }
-
 
 /** Non-secret generation, shared by collaborating windows in the same credential domain. */
 export function getCodexCredentialEpoch(context: Pick<ExtensionContext, "globalStorageUri">): string {

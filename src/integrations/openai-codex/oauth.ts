@@ -507,7 +507,10 @@ export class OpenAiCodexOAuthManager {
 				this.credentials = current
 				return current
 			}
+			// Safe event categories only; no token or account identifiers.
+			this.log("[openai-codex-oauth] refresh.network-start")
 			const refreshed = await refreshAccessToken(current, lockSignal)
+			this.log("[openai-codex-oauth] refresh.network-complete")
 			if (lockSignal.aborted) throw new Error("OpenAI Codex OAuth lock lost")
 			const latest = await this.readStoredCredentials()
 			if (!latest || JSON.stringify(latest) !== JSON.stringify(current)) {

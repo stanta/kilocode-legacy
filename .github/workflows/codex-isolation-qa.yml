@@ -32,6 +32,7 @@ jobs:
         run: |
           pnpm --dir src exec vitest run \
             integrations/openai-codex/__tests__/oauth-delegated.spec.ts \
+            integrations/openai-codex/__tests__/storage-probe.spec.ts \
             integrations/openai-codex/__tests__/oauth-refresh-lock.process.spec.ts \
             api/providers/__tests__/openai-codex-isolation-diagnostics.spec.ts \
             api/providers/__tests__/openai-codex-native-tool-calls.spec.ts \
@@ -50,7 +51,7 @@ jobs:
       - name: Lint changed extension implementation
         if: always()
         run: |
-          pnpm --dir src exec eslint             integrations/openai-codex/oauth.ts             integrations/openai-codex/oauth-refresh-lock.ts             api/providers/openai-codex.ts             api/providers/virtual-quota-fallback.ts             api/index.ts             core/condense/index.ts             core/task/Task.ts             core/kilocode/agent-manager/RuntimeProcessHandler.ts             core/kilocode/agent-manager/AgentManagerProvider.ts
+          pnpm --dir src exec eslint             integrations/openai-codex/oauth.ts             integrations/openai-codex/oauth-refresh-lock.ts             integrations/openai-codex/storage-probe.ts             api/providers/openai-codex.ts             api/providers/virtual-quota-fallback.ts             api/index.ts             core/condense/index.ts             core/task/Task.ts             core/kilocode/agent-manager/RuntimeProcessHandler.ts             core/kilocode/agent-manager/AgentManagerProvider.ts
       - name: Lint changed agent runtime implementation
         if: always()
         run: |
@@ -65,6 +66,9 @@ jobs:
             src/extension.ts
             src/integrations/openai-codex/oauth.ts
             src/integrations/openai-codex/oauth-refresh-lock.ts
+            src/integrations/openai-codex/storage-probe.ts
+            src/integrations/openai-codex/__tests__/storage-probe.spec.ts
+            src/package.json
             src/integrations/openai-codex/__tests__/oauth-delegated.spec.ts
             src/integrations/openai-codex/__tests__/oauth-refresh-lock.process.spec.ts
             src/integrations/openai-codex/__tests__/oauth-refresh-lock.worker.ts

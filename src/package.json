@@ -137,6 +137,11 @@
 		},
 		"commands": [
 			{
+				"command": "kilo-code.codexStorageProbe",
+				"title": "Codex: Verify Shared SecretStorage (Diagnostics)",
+				"category": "Kilo Code"
+			},
+			{
 				"command": "kilo-code.plusButtonClicked",
 				"title": "%command.newTask.title%",
 				"icon": "$(add)"
