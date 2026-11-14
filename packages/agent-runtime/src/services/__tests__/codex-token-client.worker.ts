@@ -10,10 +10,12 @@ process.on("message", (message: any) => {
 		controller = new AbortController()
 		void client.request(message.rejectedAccessToken, controller.signal).then(
 			(snapshot) => {
-				if (process.connected) process.send?.({
-					type: "result", ok: snapshot?.accessToken?.startsWith("synthetic-access-") ?? false,
-					accountId: snapshot?.accountId,
-				})
+				if (process.connected)
+					process.send?.({
+						type: "result",
+						ok: snapshot?.accessToken?.startsWith("synthetic-access-") ?? false,
+						accountId: snapshot?.accountId,
+					})
 			},
 			async (error) => {
 				if (process.connected) process.send?.({ type: "result", error: error.message })

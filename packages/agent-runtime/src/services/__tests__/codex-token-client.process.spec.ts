@@ -10,7 +10,8 @@ const worker = fileURLToPath(new URL("./codex-token-client.worker.ts", import.me
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 	let timer: ReturnType<typeof setTimeout>
 	return Promise.race([
-		promise, new Promise<never>((_, reject) => {
+		promise,
+		new Promise<never>((_, reject) => {
 			timer = setTimeout(() => reject(new Error("IPC test timed out")), ms)
 		}),
 	]).finally(() => clearTimeout(timer))
@@ -20,34 +21,37 @@ describe("Codex token IPC with real child processes", () => {
 	it("isolates two children, cancellation, rejected-token refresh and IPC logs", async () => {
 		const children: ChildProcess[] = []
 		const output: string[] = []
-		const spawn = () => new Promise<{
-			process: ChildProcess
-			request: Promise<{ requestId: string; rejectedAccessToken?: string }>
-			result: Promise<any>
-		}>((resolve, reject) => {
-			const child = fork(worker, [], {
-				execArgv: ["--import", "tsx"],
-				stdio: ["ignore", "pipe", "pipe", "ipc"],
+		const spawn = () =>
+			new Promise<{
+				process: ChildProcess
+				request: Promise<{ requestId: string; rejectedAccessToken?: string }>
+				result: Promise<any>
+			}>((resolve, reject) => {
+				const child = fork(worker, [], {
+					execArgv: ["--import", "tsx"],
+					stdio: ["ignore", "pipe", "pipe", "ipc"],
+				})
+				children.push(child)
+				child.stdout?.on("data", (chunk) => output.push(String(chunk)))
+				child.stderr?.on("data", (chunk) => output.push(String(chunk)))
+				let requestResolve!: (request: { requestId: string; rejectedAccessToken?: string }) => void
+				let resultResolve!: (result: any) => void
+				const request = new Promise<{ requestId: string; rejectedAccessToken?: string }>((done) => {
+					requestResolve = done
+				})
+				const result = new Promise<any>((done) => {
+					resultResolve = done
+				})
+				child.on("message", (message: any) => {
+					if (message?.type === "ready") resolve({ process: child, request, result })
+					else if (message?.type === "codexTokenRequest") requestResolve(message)
+					else if (message?.type === "result") resultResolve(message)
+				})
+				child.on("error", reject)
+				child.on("exit", (code) => {
+					if (code && code !== 0) reject(new Error("Worker exited " + code))
+				})
 			})
-			children.push(child)
-			child.stdout?.on("data", (chunk) => output.push(String(chunk)))
-			child.stderr?.on("data", (chunk) => output.push(String(chunk)))
-			let requestResolve!: (request: { requestId: string; rejectedAccessToken?: string }) => void
-			let resultResolve!: (result: any) => void
-			const request = new Promise<{ requestId: string; rejectedAccessToken?: string }>((done) => {
-				requestResolve = done
-			})
-			const result = new Promise<any>((done) => { resultResolve = done })
-			child.on("message", (message: any) => {
-				if (message?.type === "ready") resolve({ process: child, request, result })
-				else if (message?.type === "codexTokenRequest") requestResolve(message)
-				else if (message?.type === "result") resultResolve(message)
-			})
-			child.on("error", reject)
-			child.on("exit", (code) => {
-				if (code && code !== 0) reject(new Error("Worker exited " + code))
-			})
-		})
 		try {
 			const [a, b] = await withTimeout(Promise.all([spawn(), spawn()]), 12_000)
 			a.process.send({ type: "start" })
@@ -57,15 +61,19 @@ describe("Codex token IPC with real child processes", () => {
 			a.process.send({ type: "cancel" })
 			expect((await withTimeout(a.result, 8_000)).error).toMatch(/cancelled/)
 			b.process.send({
-				type: "codexTokenResponse", requestId: requestB.requestId,
+				type: "codexTokenResponse",
+				requestId: requestB.requestId,
 				snapshot: { accessToken: "synthetic-access-new", accountId: "synthetic-account" },
 			})
 			expect(await withTimeout(b.result, 8_000)).toEqual({
-				type: "result", ok: true, accountId: "synthetic-account",
+				type: "result",
+				ok: true,
+				accountId: "synthetic-account",
 			})
 			// A late reply must not reach the cancelled task.
 			a.process.send({
-				type: "codexTokenResponse", requestId: requestA.requestId,
+				type: "codexTokenResponse",
+				requestId: requestA.requestId,
 				snapshot: { accessToken: "synthetic-access-stale" },
 			})
 			expect(output.join("")).not.toMatch(/synthetic-access-|synthetic-account|refresh_token/)
@@ -85,12 +93,22 @@ describe("Codex token IPC with real child processes", () => {
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
 		})
 		try {
-			await withTimeout(new Promise<void>((resolve) => child.on("message", (message: any) => {
-				if (message?.type === "ready") resolve()
-			})), 8_000)
-			const started = withTimeout(new Promise<void>((resolve) => child.on("message", (message: any) => {
-				if (message?.type === "codexTokenRequest") resolve()
-			})), 8_000)
+			await withTimeout(
+				new Promise<void>((resolve) =>
+					child.on("message", (message: any) => {
+						if (message?.type === "ready") resolve()
+					}),
+				),
+				8_000,
+			)
+			const started = withTimeout(
+				new Promise<void>((resolve) =>
+					child.on("message", (message: any) => {
+						if (message?.type === "codexTokenRequest") resolve()
+					}),
+				),
+				8_000,
+			)
 			child.send({ type: "start" })
 			await started
 			child.disconnect()

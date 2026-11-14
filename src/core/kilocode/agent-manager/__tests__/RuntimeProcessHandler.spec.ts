@@ -54,13 +54,19 @@ describe("RuntimeProcessHandler model isolation", () => {
 
 	it("authorizes trusted virtual-quota-fallback children to request Codex snapshots without copying secrets", () => {
 		const handler = new RuntimeProcessHandler(new AgentRegistry(), callbacks, "/extension")
-		handler.spawnProcess("", "/workspace", "fallback", {
-			apiConfiguration: { apiProvider: "virtual-quota-fallback" },
-			secrets: {
-				"openai-codex-oauth-credentials": "PRIVATE_REFRESH_TOKEN",
-				"other-service-key": "synthetic-test-secret",
+		handler.spawnProcess(
+			"",
+			"/workspace",
+			"fallback",
+			{
+				apiConfiguration: { apiProvider: "virtual-quota-fallback" },
+				secrets: {
+					"openai-codex-oauth-credentials": "PRIVATE_REFRESH_TOKEN",
+					"other-service-key": "synthetic-test-secret",
+				},
 			},
-		}, vi.fn())
+			vi.fn(),
+		)
 		const child = vi.mocked(fork).mock.results[0]?.value
 		expect((handler as any).codexChildren.has(child)).toBe(true)
 		const rawConfig = (vi.mocked(fork).mock.calls[0][2] as any).env.AGENT_CONFIG

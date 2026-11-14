@@ -17,11 +17,13 @@ describe("Agent Manager Codex token IPC", () => {
 
 	it("provides two child processes with one parent-owned snapshot, never a refresh token", async () => {
 		const { handler, createChild } = setup()
-		const a = createChild(), b = createChild()
+		const a = createChild(),
+			b = createChild()
 		handler.codexChildren.add(a)
 		handler.codexChildren.add(b)
 		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot").mockResolvedValue({
-			accessToken: "synthetic_access", accountId: "synthetic_account",
+			accessToken: "synthetic_access",
+			accountId: "synthetic_account",
 		})
 		await Promise.all([
 			handler.replyToCodexTokenRequest(a, { type: "codexTokenRequest", requestId: "a" }),
@@ -48,10 +50,13 @@ describe("Agent Manager Codex token IPC", () => {
 		const { handler, createChild } = setup()
 		const child = createChild()
 		handler.codexChildren.add(child)
-		const refresh = vi.spyOn(openAiCodexOAuthManager, "forceRefreshTokenSnapshot")
+		const refresh = vi
+			.spyOn(openAiCodexOAuthManager, "forceRefreshTokenSnapshot")
 			.mockResolvedValue({ accessToken: "rotated_access" })
 		await handler.replyToCodexTokenRequest(child, {
-			type: "codexTokenRequest", requestId: "401", rejectedAccessToken: "rejected_access",
+			type: "codexTokenRequest",
+			requestId: "401",
+			rejectedAccessToken: "rejected_access",
 		})
 		expect(refresh).toHaveBeenCalledWith("rejected_access")
 		expect(child.send.mock.calls[0][0]).toMatchObject({

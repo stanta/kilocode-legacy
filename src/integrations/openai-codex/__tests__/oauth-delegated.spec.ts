@@ -5,8 +5,12 @@ describe("delegated child OAuth snapshots", () => {
 	it("never copies or refreshes a token locally when parent delegation is available", async () => {
 		const calls: Array<string | undefined> = []
 		const secrets = {
-			get: vi.fn(async () => { throw new Error("Child must not load refresh credentials") }),
-			store: vi.fn(async () => { throw new Error("Child must not save refresh credentials") }),
+			get: vi.fn(async () => {
+				throw new Error("Child must not load refresh credentials")
+			}),
+			store: vi.fn(async () => {
+				throw new Error("Child must not save refresh credentials")
+			}),
 			delete: vi.fn(async () => {}),
 			getCodexTokenSnapshot: vi.fn(async (rejected?: string) => {
 				calls.push(rejected)
@@ -16,10 +20,12 @@ describe("delegated child OAuth snapshots", () => {
 		const manager = new OpenAiCodexOAuthManager()
 		manager.initialize({ secrets } as unknown as ExtensionContext)
 		expect(await manager.getTokenSnapshot()).toEqual({
-			accessToken: "synthetic_access", accountId: "synthetic_account",
+			accessToken: "synthetic_access",
+			accountId: "synthetic_account",
 		})
 		expect(await manager.forceRefreshTokenSnapshot("synthetic_access")).toEqual({
-			accessToken: "synthetic_new", accountId: "synthetic_account",
+			accessToken: "synthetic_new",
+			accountId: "synthetic_account",
 		})
 		expect(calls).toEqual([undefined, "synthetic_access"])
 		expect(secrets.get).not.toHaveBeenCalled()
@@ -54,8 +60,12 @@ describe("delegated child OAuth snapshots", () => {
 			globalStorageUri: { fsPath: directory, scheme: "file" },
 			secrets: {
 				get: async () => secret,
-				store: async (_key: string, value: string) => { secret = value },
-				delete: async () => { secret = undefined },
+				store: async (_key: string, value: string) => {
+					secret = value
+				},
+				delete: async () => {
+					secret = undefined
+				},
 			},
 		} as unknown as ExtensionContext
 		const a = new OpenAiCodexOAuthManager()
@@ -65,10 +75,17 @@ describe("delegated child OAuth snapshots", () => {
 		try {
 			const beforeLogout = getCodexCredentialEpoch(context)
 			await b.clearCredentials()
-			await expect(a.saveCredentials({
-				type: "openai-codex", access_token: "synthetic-access-old",
-				refresh_token: "synthetic-refresh-old", expires: Date.now() + 3600_000,
-			}, beforeLogout)).rejects.toThrow(/superseded/)
+			await expect(
+				a.saveCredentials(
+					{
+						type: "openai-codex",
+						access_token: "synthetic-access-old",
+						refresh_token: "synthetic-refresh-old",
+						expires: Date.now() + 3600_000,
+					},
+					beforeLogout,
+				),
+			).rejects.toThrow(/superseded/)
 			expect(await context.secrets.get(OPENAI_CODEX_CREDENTIALS_KEY)).toBeUndefined()
 		} finally {
 			a.dispose()
@@ -80,14 +97,22 @@ describe("delegated child OAuth snapshots", () => {
 	it("redacts token endpoint error body and rejects malformed expiration", async () => {
 		const { exchangeCodeForTokens } = await import("../oauth")
 		const secret = "PRIVATE_SECRET_IN_TOKEN_ENDPOINT"
-		const mock = vi.spyOn(globalThis, "fetch")
-			.mockResolvedValueOnce(Response.json({ error: "invalid_grant", error_description: secret }, { status: 400 }))
-			.mockResolvedValueOnce(Response.json({
-				access_token: "token", refresh_token: "refresh", expires_in: 0,
-			}))
+		const mock = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValueOnce(
+				Response.json({ error: "invalid_grant", error_description: secret }, { status: 400 }),
+			)
+			.mockResolvedValueOnce(
+				Response.json({
+					access_token: "token",
+					refresh_token: "refresh",
+					expires_in: 0,
+				}),
+			)
 		try {
 			await expect(exchangeCodeForTokens("code", "verifier")).rejects.toMatchObject({
-				name: "OpenAiCodexOAuthTokenError", status: 400,
+				name: "OpenAiCodexOAuthTokenError",
+				status: 400,
 			})
 			await expect(exchangeCodeForTokens("code", "verifier")).rejects.toThrow()
 			expect(mock).toHaveBeenCalledTimes(2)
@@ -95,7 +120,6 @@ describe("delegated child OAuth snapshots", () => {
 			mock.mockRestore()
 		}
 	})
-
 
 	it("forces a 401 refresh when an in-flight normal refresh left the rejected token unchanged", async () => {
 		const { mkdtemp, rm } = await import("node:fs/promises")
@@ -107,14 +131,20 @@ describe("delegated child OAuth snapshots", () => {
 			globalStorageUri: { fsPath: directory, scheme: "file" },
 			secrets: {
 				get: async () => stored,
-				store: async (_key: string, value: string) => { stored = value },
-				delete: async () => { stored = undefined },
+				store: async (_key: string, value: string) => {
+					stored = value
+				},
+				delete: async () => {
+					stored = undefined
+				},
 			},
 		} as unknown as ExtensionContext
 		const manager = new OpenAiCodexOAuthManager()
 		manager.initialize(context)
 		let release!: () => void
-		const gate = new Promise<void>((resolve) => { release = resolve })
+		const gate = new Promise<void>((resolve) => {
+			release = resolve
+		})
 		const submitted: string[] = []
 		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, options) => {
 			const token = new URLSearchParams(String(options?.body)).get("refresh_token")!
@@ -127,8 +157,10 @@ describe("delegated child OAuth snapshots", () => {
 		})
 		try {
 			await manager.saveCredentials({
-				type: "openai-codex", access_token: "rejected",
-				refresh_token: "initial", expires: Date.now() - 1000,
+				type: "openai-codex",
+				access_token: "rejected",
+				refresh_token: "initial",
+				expires: Date.now() - 1000,
 			})
 			const ordinary = manager.getTokenSnapshot()
 			// Wait until the normal refresh has reached the endpoint.
@@ -148,5 +180,4 @@ describe("delegated child OAuth snapshots", () => {
 			await rm(directory, { recursive: true, force: true })
 		}
 	})
-
 })

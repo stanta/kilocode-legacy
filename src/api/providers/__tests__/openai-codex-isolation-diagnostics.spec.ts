@@ -59,7 +59,10 @@ describe("Codex isolation diagnostics", () => {
 
 	function manager(secrets: ReturnType<typeof sharedStorage>) {
 		const instance = new OpenAiCodexOAuthManager()
-		instance.initialize({ secrets, globalStorageUri: { fsPath: lockDirectory, scheme: "file" } } as unknown as ExtensionContext, () => {})
+		instance.initialize(
+			{ secrets, globalStorageUri: { fsPath: lockDirectory, scheme: "file" } } as unknown as ExtensionContext,
+			() => {},
+		)
 		return instance
 	}
 
@@ -135,7 +138,9 @@ describe("Codex isolation diagnostics", () => {
 	})
 
 	function provider() {
-		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot").mockResolvedValue({ accessToken: "synthetic-private-token" })
+		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot").mockResolvedValue({
+			accessToken: "synthetic-private-token",
+		})
 		vi.spyOn(openAiCodexOAuthManager, "getAccountId").mockResolvedValue(null)
 		return new OpenAiCodexHandler({ apiModelId: "gpt-6.1-sol" })
 	}
@@ -173,13 +178,19 @@ describe("Codex isolation diagnostics", () => {
 
 		const chunks: unknown[] = []
 		await expect(async () => {
-			for await (const chunk of handler.createMessage("PRIVATE PROMPT", [{ role: "user", content: "PRIVATE TEXT" }], {
-				taskId: "task-replay",
-			})) {
+			for await (const chunk of handler.createMessage(
+				"PRIVATE PROMPT",
+				[{ role: "user", content: "PRIVATE TEXT" }],
+				{
+					taskId: "task-replay",
+				},
+			)) {
 				chunks.push(chunk)
 			}
 		}).rejects.toMatchObject({
-			codexRequest: true, code: "interrupted", safeToRetry: false,
+			codexRequest: true,
+			code: "interrupted",
+			safeToRetry: false,
 		})
 		expect(chunks).toEqual([{ type: "reasoning", text: "First attempt" }])
 		expect(fetchMock).not.toHaveBeenCalled()
@@ -234,7 +245,9 @@ describe("Codex isolation diagnostics", () => {
 		vi.mocked(openAiCodexOAuthManager.getTokenSnapshot).mockRejectedValue(new Error("PRIVATE AUTH ERROR"))
 
 		await expect(consume(handler, "task-auth-failed")).rejects.toMatchObject({
-			codexRequest: true, code: "auth", safeToRetry: false,
+			codexRequest: true,
+			code: "auth",
+			safeToRetry: false,
 		})
 
 		const records = vi.mocked(console.info).mock.calls.map((call) => call[1] as Record<string, unknown>)
@@ -280,13 +293,19 @@ describe("Codex isolation diagnostics", () => {
 	it("rejects a second concurrent request on the same handler without corrupting the first", async () => {
 		const handler = provider()
 		let release!: () => void
-		const gate = new Promise<void>((resolve) => { release = resolve })
-		;(handler as any).client = { responses: { create: vi.fn(async () => ({
-			async *[Symbol.asyncIterator]() {
-				await gate
-				yield { type: "response.completed", response: { id: "response_first", output: [] } }
+		const gate = new Promise<void>((resolve) => {
+			release = resolve
+		})
+		;(handler as any).client = {
+			responses: {
+				create: vi.fn(async () => ({
+					async *[Symbol.asyncIterator]() {
+						await gate
+						yield { type: "response.completed", response: { id: "response_first", output: [] } }
+					},
+				})),
 			},
-		})) } }
+		}
 		const first = consume(handler, "first")
 		await Promise.resolve()
 		await Promise.resolve()
@@ -298,13 +317,18 @@ describe("Codex isolation diagnostics", () => {
 
 	it("does not accept EOF or incomplete terminal state as a successful response", async () => {
 		const handler = provider()
-		const create = vi.fn()
-			.mockResolvedValueOnce({ async *[Symbol.asyncIterator]() {
-				yield { type: "response.reasoning.delta", delta: "partial" }
-			} })
-			.mockResolvedValueOnce({ async *[Symbol.asyncIterator]() {
-				yield { type: "response.completed", response: { status: "incomplete" } }
-			} })
+		const create = vi
+			.fn()
+			.mockResolvedValueOnce({
+				async *[Symbol.asyncIterator]() {
+					yield { type: "response.reasoning.delta", delta: "partial" }
+				},
+			})
+			.mockResolvedValueOnce({
+				async *[Symbol.asyncIterator]() {
+					yield { type: "response.completed", response: { status: "incomplete" } }
+				},
+			})
 		;(handler as any).client = { responses: { create } }
 		await expect(consume(handler, "eof")).rejects.toThrow(/closed without a completed response/)
 		await expect(consume(handler, "incomplete")).rejects.toThrow(/failed or incomplete/)
@@ -315,15 +339,20 @@ describe("Codex isolation diagnostics", () => {
 		const handler = provider()
 		vi.useFakeTimers()
 		const controller = new AbortController()
-		const create = vi.fn((_body: unknown, options: { signal: AbortSignal }) =>
-			new Promise((_resolve, reject) => {
-				options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true })
-			}))
+		const create = vi.fn(
+			(_body: unknown, options: { signal: AbortSignal }) =>
+				new Promise((_resolve, reject) => {
+					options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true })
+				}),
+		)
 		;(handler as any).client = { responses: { create } }
 		const running = (async () => {
 			for await (const _chunk of handler.createMessage("system", [], undefined, {
-				signal: controller.signal, deadlineAt: Date.now() + 250,
-			})) { /* no content expected */ }
+				signal: controller.signal,
+				deadlineAt: Date.now() + 250,
+			})) {
+				/* no content expected */
+			}
 		})()
 		const assertion = expect(running).rejects.toThrow(/deadline exceeded/)
 		await vi.advanceTimersByTimeAsync(300)
@@ -338,7 +367,8 @@ describe("Codex isolation diagnostics", () => {
 		const create = vi.fn()
 		;(handler as any).client = { responses: { create } }
 		await expect(async () => {
-			for await (const _chunk of handler.createMessage("system", [], undefined, { signal: controller.signal })) {}
+			for await (const _chunk of handler.createMessage("system", [], undefined, { signal: controller.signal })) {
+			}
 		}).rejects.toThrow(/cancelled/)
 		expect(create).not.toHaveBeenCalled()
 	})
@@ -346,12 +376,21 @@ describe("Codex isolation diagnostics", () => {
 	it("recognizes a complete SSE terminal event without trailing newline", async () => {
 		const handler = provider()
 		;(handler as any).useManualSse = true
-		const payload = 'data: ' + JSON.stringify({
-			type: "response.completed", response: { id: "sse_final", output: [], status: "completed" },
-		})
-		vi.stubGlobal("fetch", vi.fn(async () => new Response(payload, {
-			headers: { "Content-Type": "text/event-stream" },
-		})))
+		const payload =
+			"data: " +
+			JSON.stringify({
+				type: "response.completed",
+				response: { id: "sse_final", output: [], status: "completed" },
+			})
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(payload, {
+						headers: { "Content-Type": "text/event-stream" },
+					}),
+			),
+		)
 		await consume(handler, "sse")
 		expect(handler.getResponseId()).toBe("sse_final")
 	})
@@ -362,24 +401,35 @@ describe("Codex isolation diagnostics", () => {
 		const create = vi.fn().mockRejectedValue({ status: 403 })
 		;(handler as any).client = { responses: { create } }
 		await expect(consume(handler, "forbidden")).rejects.toMatchObject({
-			codexRequest: true, status: 403, safeToRetry: false,
+			codexRequest: true,
+			status: 403,
+			safeToRetry: false,
 		})
 		expect(create).toHaveBeenCalledTimes(1)
 		expect(refresh).not.toHaveBeenCalled()
 	})
 
-
 	it("rejects a completed event containing a nested server error", async () => {
 		const handler = provider()
-		;(handler as any).client = { responses: { create: vi.fn(async () => ({
-			async *[Symbol.asyncIterator]() {
-				yield { type: "response.completed", response: {
-					status: "completed", error: { code: "internal" }, output: [],
-				} }
+		;(handler as any).client = {
+			responses: {
+				create: vi.fn(async () => ({
+					async *[Symbol.asyncIterator]() {
+						yield {
+							type: "response.completed",
+							response: {
+								status: "completed",
+								error: { code: "internal" },
+								output: [],
+							},
+						}
+					},
+				})),
 			},
-		})) } }
+		}
 		await expect(consume(handler, "nested-error")).rejects.toMatchObject({
-			codexRequest: true, code: "interrupted",
+			codexRequest: true,
+			code: "interrupted",
 		})
 		expect(handler.getResponseId()).toBeUndefined()
 	})
@@ -387,10 +437,12 @@ describe("Codex isolation diagnostics", () => {
 	it("prevents a 401 retry from silently changing the authenticated account", async () => {
 		const handler = provider()
 		vi.mocked(openAiCodexOAuthManager.getTokenSnapshot).mockResolvedValue({
-			accessToken: "old", accountId: "account-A",
+			accessToken: "old",
+			accountId: "account-A",
 		})
 		vi.spyOn(openAiCodexOAuthManager, "forceRefreshTokenSnapshot").mockResolvedValue({
-			accessToken: "new", accountId: "account-B",
+			accessToken: "new",
+			accountId: "account-B",
 		})
 		const create = vi.fn().mockRejectedValue({ status: 401 })
 		;(handler as any).client = { responses: { create } }
@@ -401,17 +453,25 @@ describe("Codex isolation diagnostics", () => {
 	it("stops processing events after terminal success", async () => {
 		const handler = provider()
 		let finallyCalled = false
-		;(handler as any).client = { responses: { create: vi.fn(async () => ({
-			async *[Symbol.asyncIterator]() {
-				try {
-					yield { type: "response.completed", response: { id: "final", status: "completed", output: [] } }
-					yield { type: "response.reasoning.delta", delta: "LATE" }
-				} finally { finallyCalled = true }
+		;(handler as any).client = {
+			responses: {
+				create: vi.fn(async () => ({
+					async *[Symbol.asyncIterator]() {
+						try {
+							yield {
+								type: "response.completed",
+								response: { id: "final", status: "completed", output: [] },
+							}
+							yield { type: "response.reasoning.delta", delta: "LATE" }
+						} finally {
+							finallyCalled = true
+						}
+					},
+				})),
 			},
-		})) } }
+		}
 		expect(await consume(handler, "after-terminal")).toEqual([])
 		expect(finallyCalled).toBe(true)
 		expect(handler.getResponseId()).toBe("final")
 	})
-
 })

@@ -2247,18 +2247,20 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			newContextTokens = 0,
 			error,
 			condenseId,
-		} = await this.runCondensing((signal) => summarizeConversation(
-			this.apiConversationHistory,
-			this.api,
-			systemPrompt,
-			this.taskId,
-			prevContextTokens,
-			false,
-			customCondensingPrompt,
-			condensingApiHandler,
-			useNativeTools,
-			signal,
-		))
+		} = await this.runCondensing((signal) =>
+			summarizeConversation(
+				this.apiConversationHistory,
+				this.api,
+				systemPrompt,
+				this.taskId,
+				prevContextTokens,
+				false,
+				customCondensingPrompt,
+				condensingApiHandler,
+				useNativeTools,
+				signal,
+			),
+		)
 		if (error) {
 			this.say(
 				"condense_context_error",
@@ -4906,8 +4908,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		const apiConfiguration = this.getSessionApiConfiguration()
 		// Preserve a single finite deadline across all Task-owned Codex auto-retries.
 		const rawCodexTimeout = getApiRequestTimeout()
-		const codexTimeout = typeof rawCodexTimeout === "number" && Number.isFinite(rawCodexTimeout) &&
-			rawCodexTimeout > 0 ? rawCodexTimeout : 600_000
+		const codexTimeout =
+			typeof rawCodexTimeout === "number" && Number.isFinite(rawCodexTimeout) && rawCodexTimeout > 0
+				? rawCodexTimeout
+				: 600_000
 		const codexDeadlineAt = options.codexDeadlineAt ?? Date.now() + codexTimeout
 		const condensingSettings = await this.ensureSessionCondensingSettings()
 
@@ -5110,18 +5114,20 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			)
 			console.log(`[Task#${this.taskId}] Re-condensing after uncondense - context tokens: ${prevContextTokens}`)
 
-			const recondenseResult = await this.runCondensing(async (signal) => summarizeConversation(
-				this.apiConversationHistory,
-				this.api,
-				await this.getSystemPrompt(),
-				this.taskId,
-				prevContextTokens,
-				true,
-				undefined,
-				undefined,
-				this._taskToolProtocol === "native",
-				signal,
-			))
+			const recondenseResult = await this.runCondensing(async (signal) =>
+				summarizeConversation(
+					this.apiConversationHistory,
+					this.api,
+					await this.getSystemPrompt(),
+					this.taskId,
+					prevContextTokens,
+					true,
+					undefined,
+					undefined,
+					this._taskToolProtocol === "native",
+					signal,
+				),
+			)
 
 			if (recondenseResult.error) {
 				console.error(`[Task#${this.taskId}] Re-condensation failed: ${recondenseResult.error}`)
@@ -5314,7 +5320,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			// Abort the losing network attempt before backoff or resubmission.
 			requestController.abort()
 			const isCodexAttempt = apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest
-			const closePromise = iterator.return(undefined).then(() => true, () => false)
+			const closePromise = iterator.return(undefined).then(
+				() => true,
+				() => false,
+			)
 			if (isCodexAttempt && !cancelled && (error as any)?.safeToRetry) {
 				// Never dispatch a second Codex attempt until the first iterator has closed.
 				let closeTimer: ReturnType<typeof setTimeout> | undefined
@@ -5561,7 +5570,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			}
 
 			const retryAfterSeconds = Number.isFinite(error?.retryAfterMs)
-				? Math.max(0, Math.ceil(error.retryAfterMs / 1000)) : 0
+				? Math.max(0, Math.ceil(error.retryAfterMs / 1000))
+				: 0
 			const finalDelay = Math.max(exponentialDelay, rateLimitDelay, retryAfterSeconds)
 			if (deadlineAt !== undefined && Date.now() + finalDelay * 1000 >= deadlineAt) {
 				throw new Error("Codex request deadline will expire before retry")

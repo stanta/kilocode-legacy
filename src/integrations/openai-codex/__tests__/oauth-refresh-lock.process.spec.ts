@@ -12,33 +12,44 @@ describe("Codex OAuth lock across independent processes", () => {
 		const worker = fileURLToPath(new URL("./oauth-refresh-lock.worker.ts", import.meta.url))
 		const children: ChildProcess[] = []
 		try {
-			await writeFile(path.join(directory, "synthetic-state.json"), JSON.stringify({
-				version: 0, refreshes: 0,
-			}))
-			const start = () => new Promise<{ version: number; refreshes: number }>((resolve, reject) => {
-				const child = fork(worker, [], {
-					execArgv: ["--import", "tsx"],
-					env: { ...process.env, CODEX_LOCK_TEST_DIR: directory },
-					stdio: ["ignore", "ignore", "ignore", "ipc"],
-				})
-				children.push(child)
-				const timer = setTimeout(() => reject(new Error("child lock test timed out")), 15_000)
-				child.on("message", (msg: any) => {
-					if (msg?.type === "ready") child.send("start")
-					if (msg?.type === "done") {
+			await writeFile(
+				path.join(directory, "synthetic-state.json"),
+				JSON.stringify({
+					version: 0,
+					refreshes: 0,
+				}),
+			)
+			const start = () =>
+				new Promise<{ version: number; refreshes: number }>((resolve, reject) => {
+					const child = fork(worker, [], {
+						execArgv: ["--import", "tsx"],
+						env: { ...process.env, CODEX_LOCK_TEST_DIR: directory },
+						stdio: ["ignore", "ignore", "ignore", "ipc"],
+					})
+					children.push(child)
+					const timer = setTimeout(() => reject(new Error("child lock test timed out")), 15_000)
+					child.on("message", (msg: any) => {
+						if (msg?.type === "ready") child.send("start")
+						if (msg?.type === "done") {
+							clearTimeout(timer)
+							resolve(msg.state)
+						}
+						if (msg?.type === "failed") {
+							clearTimeout(timer)
+							reject(new Error("child lock failed: " + msg.code))
+						}
+					})
+					child.on("error", (error) => {
 						clearTimeout(timer)
-						resolve(msg.state)
-					}
-					if (msg?.type === "failed") {
-						clearTimeout(timer)
-						reject(new Error("child lock failed: " + msg.code))
-					}
+						reject(error)
+					})
+					child.on("exit", (code) => {
+						if (code && code !== 0) {
+							clearTimeout(timer)
+							reject(new Error("worker exit " + code))
+						}
+					})
 				})
-				child.on("error", (error) => { clearTimeout(timer); reject(error) })
-				child.on("exit", (code) => {
-					if (code && code !== 0) { clearTimeout(timer); reject(new Error("worker exit " + code)) }
-				})
-			})
 			const [a, b] = await Promise.all([start(), start()])
 			const finalState = JSON.parse(await readFile(path.join(directory, "synthetic-state.json"), "utf8"))
 			expect(a.version).toBe(1)

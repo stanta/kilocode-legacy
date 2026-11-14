@@ -399,12 +399,14 @@ export class OpenAiCodexOAuthManager {
 		rejectedAccessToken?: string,
 		signal?: AbortSignal,
 	): Promise<{ accessToken: string; accountId?: string } | null> | undefined {
-		const storage = this.context?.secrets as unknown as {
-			getCodexTokenSnapshot?: (
-				rejectedAccessToken?: string,
-				signal?: AbortSignal,
-			) => Promise<{ accessToken: string; accountId?: string } | null>
-		} | undefined
+		const storage = this.context?.secrets as unknown as
+			| {
+					getCodexTokenSnapshot?: (
+						rejectedAccessToken?: string,
+						signal?: AbortSignal,
+					) => Promise<{ accessToken: string; accountId?: string } | null>
+			  }
+			| undefined
 		if (!storage?.getCodexTokenSnapshot) return undefined
 		return storage.getCodexTokenSnapshot(rejectedAccessToken, signal).then((snapshot) => {
 			this.delegatedAuthenticated = !!snapshot
@@ -512,8 +514,11 @@ export class OpenAiCodexOAuthManager {
 		if (existing) {
 			const activeRejectedToken = this.refreshRejectedToken
 			const result = await existing
-			if (rejectedAccessToken && result?.access_token === rejectedAccessToken &&
-				activeRejectedToken !== rejectedAccessToken) {
+			if (
+				rejectedAccessToken &&
+				result?.access_token === rejectedAccessToken &&
+				activeRejectedToken !== rejectedAccessToken
+			) {
 				return this.refreshUnderLock(rejectedAccessToken)
 			}
 			return result
@@ -522,12 +527,14 @@ export class OpenAiCodexOAuthManager {
 		const operation = this.refreshUnderLock(rejectedAccessToken)
 		this.refreshPromise = operation
 		this.refreshRejectedToken = rejectedAccessToken ?? null
-		void operation.finally(() => {
-			if (this.refreshPromise === operation) {
-				this.refreshPromise = null
-				this.refreshRejectedToken = null
-			}
-		}).catch(() => {})
+		void operation
+			.finally(() => {
+				if (this.refreshPromise === operation) {
+					this.refreshPromise = null
+					this.refreshRejectedToken = null
+				}
+			})
+			.catch(() => {})
 		return operation
 	}
 
@@ -557,7 +564,7 @@ export class OpenAiCodexOAuthManager {
 
 	async forceRefreshAccessToken(): Promise<string | null> {
 		const current = await this.loadCredentials()
-		return current ? (await this.forceRefreshTokenSnapshot(current.access_token))?.accessToken ?? null : null
+		return current ? ((await this.forceRefreshTokenSnapshot(current.access_token))?.accessToken ?? null) : null
 	}
 
 	async getAccountId(): Promise<string | null> {

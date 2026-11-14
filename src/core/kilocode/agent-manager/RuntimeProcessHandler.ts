@@ -406,8 +406,10 @@ export class RuntimeProcessHandler {
 			})
 
 			// Only children launched for Codex may obtain a parent-owned token snapshot.
-			if (options?.apiConfiguration?.apiProvider === "openai-codex" ||
-				options?.apiConfiguration?.apiProvider === "virtual-quota-fallback") {
+			if (
+				options?.apiConfiguration?.apiProvider === "openai-codex" ||
+				options?.apiConfiguration?.apiProvider === "virtual-quota-fallback"
+			) {
 				this.codexChildren.add(proc)
 			}
 			// Store pending process info
@@ -512,16 +514,21 @@ export class RuntimeProcessHandler {
 		const send = (data: Pick<ParentIPCMessage, "snapshot" | "error">) => {
 			if (!proc.connected) return
 			const response: ParentIPCMessage = { type: "codexTokenResponse", requestId, ...data }
-			try { proc.send(response, () => {}) } catch { /* child exited */ }
+			try {
+				proc.send(response, () => {})
+			} catch {
+				/* child exited */
+			}
 		}
 		if (!this.codexChildren.has(proc)) {
 			send({ error: { code: "not_authorized" } })
 			return
 		}
 		try {
-			const snapshot = typeof msg.rejectedAccessToken === "string"
-				? await openAiCodexOAuthManager.forceRefreshTokenSnapshot(msg.rejectedAccessToken)
-				: await openAiCodexOAuthManager.getTokenSnapshot()
+			const snapshot =
+				typeof msg.rejectedAccessToken === "string"
+					? await openAiCodexOAuthManager.forceRefreshTokenSnapshot(msg.rejectedAccessToken)
+					: await openAiCodexOAuthManager.getTokenSnapshot()
 			send({ snapshot })
 		} catch (error) {
 			// Only a category and HTTP status cross IPC; never send raw endpoint bodies.

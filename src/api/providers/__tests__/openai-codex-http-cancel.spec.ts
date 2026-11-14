@@ -38,27 +38,50 @@ describe("Codex real HTTP cancellation and SSE lifecycle", () => {
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
 		const port = (server.address() as AddressInfo).port
 		const rawFetch = globalThis.fetch.bind(globalThis)
-		vi.stubGlobal("fetch", vi.fn((_url: unknown, options?: RequestInit) => 
-			rawFetch("http://127.0.0.1:" + port + "/responses", options)))
-		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot")
-			.mockResolvedValue({ accessToken: "synthetic", accountId: "synthetic_account" })
+		vi.stubGlobal(
+			"fetch",
+			vi.fn((_url: unknown, options?: RequestInit) =>
+				rawFetch("http://127.0.0.1:" + port + "/responses", options),
+			),
+		)
+		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot").mockResolvedValue({
+			accessToken: "synthetic",
+			accountId: "synthetic_account",
+		})
 		const make = () => {
 			const handler = new OpenAiCodexHandler({ apiModelId: "gpt-6.1-sol" })
 			;(handler as any).useManualSse = true
 			return handler
 		}
-		const handlerA = make(), handlerB = make()
-		const stopA = new AbortController(), stopB = new AbortController()
+		const handlerA = make(),
+			handlerB = make()
+		const stopA = new AbortController(),
+			stopB = new AbortController()
 		try {
-			const iteratorA = handlerA.createMessage("system", [], { taskId: "A" }, {
-				signal: stopA.signal,
-			})[Symbol.asyncIterator]()
-			const iteratorB = handlerB.createMessage("system", [], { taskId: "B" }, {
-				signal: stopB.signal,
-			})[Symbol.asyncIterator]()
+			const iteratorA = handlerA
+				.createMessage(
+					"system",
+					[],
+					{ taskId: "A" },
+					{
+						signal: stopA.signal,
+					},
+				)
+				[Symbol.asyncIterator]()
+			const iteratorB = handlerB
+				.createMessage(
+					"system",
+					[],
+					{ taskId: "B" },
+					{
+						signal: stopB.signal,
+					},
+				)
+				[Symbol.asyncIterator]()
 			const first = await bounded(Promise.all([iteratorA.next(), iteratorB.next()]))
 			expect(first.map((chunk) => chunk.value)).toEqual([
-				{ type: "reasoning", text: "A" }, { type: "reasoning", text: "B" },
+				{ type: "reasoning", text: "A" },
+				{ type: "reasoning", text: "B" },
 			])
 			const closedA = new Promise<void>((resolve) => disconnected.set("A", resolve))
 			const pendingA = iteratorA.next()
@@ -66,9 +89,14 @@ describe("Codex real HTTP cancellation and SSE lifecycle", () => {
 			await expect(bounded(pendingA)).rejects.toThrow(/cancelled/)
 			await bounded(closedA)
 			expect(responses.get("B")?.destroyed).toBe(false)
-			responses.get("B")?.end("data: " + JSON.stringify({
-				type: "response.completed", response: { id: "B_done", output: [], status: "completed" },
-			}) + "\n\n")
+			responses.get("B")?.end(
+				"data: " +
+					JSON.stringify({
+						type: "response.completed",
+						response: { id: "B_done", output: [], status: "completed" },
+					}) +
+					"\n\n",
+			)
 			expect(await bounded(iteratorB.next())).toMatchObject({ done: true })
 			expect(handlerA.getResponseId()).toBeUndefined()
 			expect(handlerB.getResponseId()).toBe("B_done")
@@ -84,7 +112,9 @@ describe("Codex real HTTP cancellation and SSE lifecycle", () => {
 
 	it("deadline terminates a stalled body after HTTP 200 and closes the socket", async () => {
 		let finished!: () => void
-		const closed = new Promise<void>((resolve) => { finished = resolve })
+		const closed = new Promise<void>((resolve) => {
+			finished = resolve
+		})
 		const server = createServer((_req, response) => {
 			response.writeHead(200, { "Content-Type": "text/event-stream" })
 			response.write("data: " + JSON.stringify({ type: "response.reasoning.delta", delta: "partial" }) + "\n\n")
@@ -93,16 +123,26 @@ describe("Codex real HTTP cancellation and SSE lifecycle", () => {
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
 		const port = (server.address() as AddressInfo).port
 		const rawFetch = globalThis.fetch.bind(globalThis)
-		vi.stubGlobal("fetch", vi.fn((_url: unknown, options?: RequestInit) =>
-			rawFetch("http://127.0.0.1:" + port + "/responses", options)))
-		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot")
-			.mockResolvedValue({ accessToken: "synthetic" })
+		vi.stubGlobal(
+			"fetch",
+			vi.fn((_url: unknown, options?: RequestInit) =>
+				rawFetch("http://127.0.0.1:" + port + "/responses", options),
+			),
+		)
+		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot").mockResolvedValue({ accessToken: "synthetic" })
 		const handler = new OpenAiCodexHandler({ apiModelId: "gpt-6.1-sol" })
 		;(handler as any).useManualSse = true
 		try {
-			const iterator = handler.createMessage("system", [], { taskId: "timeout" }, {
-				deadlineAt: Date.now() + 1_000,
-			})[Symbol.asyncIterator]()
+			const iterator = handler
+				.createMessage(
+					"system",
+					[],
+					{ taskId: "timeout" },
+					{
+						deadlineAt: Date.now() + 1_000,
+					},
+				)
+				[Symbol.asyncIterator]()
 			expect((await bounded(iterator.next())).value).toEqual({ type: "reasoning", text: "partial" })
 			await expect(bounded(iterator.next())).rejects.toThrow(/deadline exceeded/)
 			await bounded(closed)
@@ -115,21 +155,29 @@ describe("Codex real HTTP cancellation and SSE lifecycle", () => {
 	it("terminal SSE frame without trailing newline finishes instead of waiting for EOF", async () => {
 		const server = createServer((_req, response) => {
 			response.writeHead(200, { "Content-Type": "text/event-stream" })
-			response.end("data: " + JSON.stringify({
-				type: "response.completed", response: { id: "final", output: [], status: "completed" },
-			}))
+			response.end(
+				"data: " +
+					JSON.stringify({
+						type: "response.completed",
+						response: { id: "final", output: [], status: "completed" },
+					}),
+			)
 		})
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
 		const port = (server.address() as AddressInfo).port
 		const rawFetch = globalThis.fetch.bind(globalThis)
-		vi.stubGlobal("fetch", vi.fn((_url: unknown, options?: RequestInit) =>
-			rawFetch("http://127.0.0.1:" + port + "/responses", options)))
-		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot")
-			.mockResolvedValue({ accessToken: "synthetic" })
+		vi.stubGlobal(
+			"fetch",
+			vi.fn((_url: unknown, options?: RequestInit) =>
+				rawFetch("http://127.0.0.1:" + port + "/responses", options),
+			),
+		)
+		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot").mockResolvedValue({ accessToken: "synthetic" })
 		const handler = new OpenAiCodexHandler({ apiModelId: "gpt-6.1-sol" })
 		;(handler as any).useManualSse = true
 		try {
-			for await (const _chunk of handler.createMessage("system", [], { taskId: "tail" })) {}
+			for await (const _chunk of handler.createMessage("system", [], { taskId: "tail" })) {
+			}
 			expect(handler.getResponseId()).toBe("final")
 		} finally {
 			server.closeAllConnections()

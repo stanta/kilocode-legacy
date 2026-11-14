@@ -14,14 +14,14 @@ export type CodexTokenResponse = {
 }
 
 /** Only access-token snapshots are exchanged. The refresh token stays in parent SecretStorage. */
-export function createCodexTokenClient(
-	send: (message: CodexTokenRequest) => void,
-	timeoutMs = 60_000,
-) {
-	const pending = new Map<string, {
-		resolve: (snapshot: CodexTokenSnapshot) => void
-		reject: (error: Error) => void
-	}>()
+export function createCodexTokenClient(send: (message: CodexTokenRequest) => void, timeoutMs = 60_000) {
+	const pending = new Map<
+		string,
+		{
+			resolve: (snapshot: CodexTokenSnapshot) => void
+			reject: (error: Error) => void
+		}
+	>()
 
 	const request = (rejectedAccessToken?: string, signal?: AbortSignal): Promise<CodexTokenSnapshot> => {
 		if (signal?.aborted) return Promise.reject(new Error("Codex token request cancelled"))
@@ -34,8 +34,14 @@ export function createCodexTokenClient(
 				pending.delete(requestId)
 			}
 			const finish = {
-				resolve: (snapshot: CodexTokenSnapshot) => { cleanup(); resolve(snapshot) },
-				reject: (error: Error) => { cleanup(); reject(error) },
+				resolve: (snapshot: CodexTokenSnapshot) => {
+					cleanup()
+					resolve(snapshot)
+				},
+				reject: (error: Error) => {
+					cleanup()
+					reject(error)
+				},
 			}
 			const onAbort = () => finish.reject(new Error("Codex token request cancelled"))
 			timer = setTimeout(() => finish.reject(new Error("Codex token parent timed out")), timeoutMs)
@@ -58,11 +64,16 @@ export function createCodexTokenClient(
 		if (operation) {
 			if (message.error) {
 				const error = Object.assign(new Error("Codex token parent unavailable"), {
-					code: message.error.code, status: message.error.status,
+					code: message.error.code,
+					status: message.error.status,
 				})
 				operation.reject(error)
-			} else if (message.snapshot === null || (message.snapshot &&
-				typeof message.snapshot.accessToken === "string" && message.snapshot.accessToken.length > 0)) {
+			} else if (
+				message.snapshot === null ||
+				(message.snapshot &&
+					typeof message.snapshot.accessToken === "string" &&
+					message.snapshot.accessToken.length > 0)
+			) {
 				operation.resolve(message.snapshot)
 			} else {
 				operation.reject(new Error("Codex token parent returned invalid credentials"))

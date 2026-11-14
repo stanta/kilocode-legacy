@@ -82,7 +82,9 @@ function codexAuthorizationError(error: unknown): CodexRequestError {
 }
 
 function codexAbortReason(signal: AbortSignal): Error {
-	return signal.reason instanceof Error ? signal.reason : new CodexRequestError("Codex request cancelled", "cancelled")
+	return signal.reason instanceof Error
+		? signal.reason
+		: new CodexRequestError("Codex request cancelled", "cancelled")
 }
 
 /** Awaiting a shared refresh may be cancelled without cancelling the refresh itself. */
@@ -90,11 +92,20 @@ function awaitCodexAuth<T>(operation: Promise<T>, signal: AbortSignal): Promise<
 	if (signal.aborted) return Promise.reject(codexAbortReason(signal))
 	return new Promise<T>((resolve, reject) => {
 		const finish = () => signal.removeEventListener("abort", cancel)
-		const cancel = () => { finish(); reject(codexAbortReason(signal)) }
+		const cancel = () => {
+			finish()
+			reject(codexAbortReason(signal))
+		}
 		signal.addEventListener("abort", cancel, { once: true })
 		operation.then(
-			(value) => { finish(); resolve(value) },
-			(error) => { finish(); reject(error) },
+			(value) => {
+				finish()
+				resolve(value)
+			},
+			(error) => {
+				finish()
+				reject(error)
+			},
 		)
 	})
 }
@@ -177,10 +188,14 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		this.lastResponseId = undefined
 		this.lastResponseOutput = undefined
 		const configuredTimeout = getApiRequestTimeout()
-		const timeoutMs = typeof configuredTimeout === "number" && Number.isFinite(configuredTimeout) && configuredTimeout > 0
-			? configuredTimeout : 600_000
-		const deadlineAt = typeof requestOptions?.deadlineAt === "number" && Number.isFinite(requestOptions.deadlineAt)
-			? requestOptions.deadlineAt : Date.now() + timeoutMs
+		const timeoutMs =
+			typeof configuredTimeout === "number" && Number.isFinite(configuredTimeout) && configuredTimeout > 0
+				? configuredTimeout
+				: 600_000
+		const deadlineAt =
+			typeof requestOptions?.deadlineAt === "number" && Number.isFinite(requestOptions.deadlineAt)
+				? requestOptions.deadlineAt
+				: Date.now() + timeoutMs
 		const controller = new AbortController()
 		const onAbort = () => controller.abort(new CodexRequestError("Codex request cancelled", "cancelled"))
 		if (requestOptions?.signal?.aborted) onAbort()
@@ -199,23 +214,36 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		const diagnostic = (nextPhase: string, details: Record<string, number | boolean> = {}) => {
 			phase = nextPhase
 			// Do not log credentials, account identifiers, prompts, error bodies, or tool arguments.
-			try { (details.waiting ? console.debug : console.info)("[OpenAI Codex] Request diagnostic", {
-				pid: process.pid,
-				handlerId: this.sessionId,
-				requestId,
-				taskId: metadata?.taskId,
-				phase,
-				elapsedMs: Date.now() - started,
-				activeHandlerRequests: this.activeDiagnosticRequests,
-				...details,
-			}) } catch { /* diagnostic logging must not break a request */ }
+			try {
+				;(details.waiting ? console.debug : console.info)("[OpenAI Codex] Request diagnostic", {
+					pid: process.pid,
+					handlerId: this.sessionId,
+					requestId,
+					taskId: metadata?.taskId,
+					phase,
+					elapsedMs: Date.now() - started,
+					activeHandlerRequests: this.activeDiagnosticRequests,
+					...details,
+				})
+			} catch {
+				/* diagnostic logging must not break a request */
+			}
 		}
 		diagnostic(phase)
 		const heartbeat = setInterval(() => diagnostic(phase, { waiting: true }), 30_000)
 		heartbeat.unref()
 		try {
 			if (controller.signal.aborted) throw codexAbortReason(controller.signal)
-			yield* this.handleResponsesApiMessage(model, systemPrompt, messages, requestState, controller.signal, deadlineAt, metadata, diagnostic)
+			yield* this.handleResponsesApiMessage(
+				model,
+				systemPrompt,
+				messages,
+				requestState,
+				controller.signal,
+				deadlineAt,
+				metadata,
+				diagnostic,
+			)
 			if (!requestState.completed) {
 				throw new CodexRequestError("Codex stream closed without a completed response", "interrupted")
 			}
@@ -262,17 +290,32 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		diagnostic?.("auth.end", { authenticated: !!snapshot })
 		if (!snapshot) throw new CodexRequestError("Sign in to OpenAI Codex to continue", "auth")
 		const formattedInput = this.formatFullConversation(systemPrompt, messages, metadata?.taskId)
-		const body = this.buildRequestBody(model, formattedInput, systemPrompt, this.getReasoningEffort(model), metadata)
+		const body = this.buildRequestBody(
+			model,
+			formattedInput,
+			systemPrompt,
+			this.getReasoningEffort(model),
+			metadata,
+		)
 
 		for (let attempt = 0; attempt < 2; attempt++) {
 			if (signal.aborted) throw codexAbortReason(signal)
 			try {
-				yield* this.executeRequest(body, model, snapshot, state, signal, deadlineAt, metadata?.taskId, diagnostic)
+				yield* this.executeRequest(
+					body,
+					model,
+					snapshot,
+					state,
+					signal,
+					deadlineAt,
+					metadata?.taskId,
+					diagnostic,
+				)
 				return
 			} catch (error) {
 				if (signal.aborted) throw codexAbortReason(signal)
-				if (!(error instanceof CodexRequestError) ||
-					error.status !== 401 || state.eventsSeen || attempt !== 0) throw error
+				if (!(error instanceof CodexRequestError) || error.status !== 401 || state.eventsSeen || attempt !== 0)
+					throw error
 
 				diagnostic?.("auth.refresh.start")
 				let refreshed: Awaited<ReturnType<typeof openAiCodexOAuthManager.forceRefreshTokenSnapshot>>
@@ -288,7 +331,11 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 				diagnostic?.("auth.refresh.end", { authenticated: !!refreshed })
 				if (!refreshed) throw new CodexRequestError("Sign in to OpenAI Codex to continue", "auth", 401)
 				if (refreshed.accountId !== snapshot.accountId) {
-					throw new CodexRequestError("Codex account changed during request; start a new request", "auth", 401)
+					throw new CodexRequestError(
+						"Codex account changed during request; start a new request",
+						"auth",
+						401,
+					)
 				}
 				snapshot = refreshed
 			}
@@ -450,20 +497,22 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 			return
 		}
 
-		const client = this.client ?? new OpenAI({
-			apiKey: snapshot.accessToken,
-			baseURL: CODEX_API_BASE_URL,
-			defaultHeaders: codexHeaders,
-			maxRetries: 0,
-		})
+		const client =
+			this.client ??
+			new OpenAI({
+				apiKey: snapshot.accessToken,
+				baseURL: CODEX_API_BASE_URL,
+				defaultHeaders: codexHeaders,
+				maxRetries: 0,
+			})
 		try {
 			diagnostic?.("sdk.open.start")
-			const stream = await (client as any).responses.create(requestBody, {
+			const stream = (await (client as any).responses.create(requestBody, {
 				signal,
 				headers: codexHeaders,
 				maxRetries: 0,
 				timeout: Math.max(1, deadlineAt - Date.now()),
-			}) as AsyncIterable<any>
+			})) as AsyncIterable<any>
 			diagnostic?.("sdk.open.end")
 			if (typeof stream?.[Symbol.asyncIterator] !== "function") {
 				throw new CodexRequestError("Codex SDK did not provide a stream", "interrupted")
@@ -484,13 +533,13 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 			const headers = (error as any)?.headers
 			const retryAfter = headers?.get?.("retry-after") ?? headers?.["retry-after"]
 			const retryAfterSeconds = Number(retryAfter)
-			const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-				? retryAfterSeconds * 1000 : undefined
+			const retryAfterMs =
+				Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : undefined
 			throw new CodexRequestError(
 				status ? "Codex request rejected (HTTP " + status + ")" : "Codex transport interrupted",
 				status ? "http" : "interrupted",
 				status,
-				!state.eventsSeen && status !== undefined && (status === 429 || status >= 500 && status <= 599),
+				!state.eventsSeen && status !== undefined && (status === 429 || (status >= 500 && status <= 599)),
 				retryAfterMs,
 			)
 		}
@@ -644,7 +693,10 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		try {
 			diagnostic?.("sse.open.start")
 			response = await fetch(CODEX_API_BASE_URL + "/responses", {
-				method: "POST", headers, body: JSON.stringify(requestBody), signal,
+				method: "POST",
+				headers,
+				body: JSON.stringify(requestBody),
+				signal,
 			})
 			diagnostic?.("sse.open.end", { httpStatus: response.status })
 		} catch (error) {
@@ -654,14 +706,13 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		if (!response.ok) {
 			// HTTP 429 / 5xx is an explicit pre-response refusal; do not log the response body.
 			const retryAfter = Number(response.headers.get("retry-after"))
-			const retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0
-				? retryAfter * 1000 : undefined
+			const retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : undefined
 			void response.body?.cancel().catch(() => {})
 			throw new CodexRequestError(
 				"Codex request rejected (HTTP " + response.status + ")",
 				"http",
 				response.status,
-				response.status === 429 || response.status >= 500 && response.status <= 599,
+				response.status === 429 || (response.status >= 500 && response.status <= 599),
 				retryAfterMs,
 			)
 		}
@@ -681,8 +732,11 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		const decoder = new TextDecoder()
 		let pending = ""
 		const parseFrame = (frame: string): any | null => {
-			const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:"))
-				.map((line) => line.slice(5).trimStart()).join("\n")
+			const data = frame
+				.split(/\r?\n/)
+				.filter((line) => line.startsWith("data:"))
+				.map((line) => line.slice(5).trimStart())
+				.join("\n")
 			if (!data || data === "[DONE]") return null
 			try {
 				return JSON.parse(data)
@@ -723,7 +777,11 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 			}
 		} finally {
 			// Completing or cancelling a stream must release the fetch body.
-			try { await reader.cancel() } catch { /* already closed */ }
+			try {
+				await reader.cancel()
+			} catch {
+				/* already closed */
+			}
 			reader.releaseLock()
 		}
 	}
@@ -739,11 +797,17 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		// Terminal states are authoritative: EOF or a failed/incomplete response is never success.
 		const responseStatus = event?.response?.status
 		if (
-			event?.type === "response.failed" || event?.type === "response.error" || event?.type === "error" ||
-			event?.type === "response.incomplete" || !!event?.response?.error ||
-			responseStatus === "failed" || responseStatus === "incomplete" || responseStatus === "cancelled" ||
+			event?.type === "response.failed" ||
+			event?.type === "response.error" ||
+			event?.type === "error" ||
+			event?.type === "response.incomplete" ||
+			!!event?.response?.error ||
+			responseStatus === "failed" ||
+			responseStatus === "incomplete" ||
+			responseStatus === "cancelled" ||
 			((event?.type === "response.completed" || event?.type === "response.done") &&
-				responseStatus !== undefined && responseStatus !== "completed")
+				responseStatus !== undefined &&
+				responseStatus !== "completed")
 		) {
 			throw new CodexRequestError("Codex response failed or incomplete", "interrupted")
 		}
@@ -922,5 +986,4 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 	getResponseId(): string | undefined {
 		return this.lastResponseId
 	}
-
 }

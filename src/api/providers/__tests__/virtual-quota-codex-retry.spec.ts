@@ -14,11 +14,16 @@ describe("Virtual quota wrapper respects Codex request ownership", () => {
 
 	it("does not switch providers after a typed Codex request error", async () => {
 		const error = Object.assign(new Error("Codex HTTP 429"), {
-			codexRequest: true, status: 429, safeToRetry: true,
+			codexRequest: true,
+			status: 429,
+			safeToRetry: true,
 		})
-		const { handler, delegate, adjust } = fakeWrapper(async function* () { throw error })
+		const { handler, delegate, adjust } = fakeWrapper(async function* () {
+			throw error
+		})
 		await expect(async () => {
-			for await (const _ of handler.createMessage("test", [])) {}
+			for await (const _ of handler.createMessage("test", [])) {
+			}
 		}).rejects.toBe(error)
 		expect(delegate).toHaveBeenCalledTimes(1)
 		expect(adjust).not.toHaveBeenCalledWith("Retryable Error")
@@ -43,7 +48,8 @@ describe("Virtual quota wrapper respects Codex request ownership", () => {
 		const { handler, delegate } = fakeWrapper(async function* () {
 			yield { type: "text", text: "ok" }
 		})
-		for await (const _ of handler.createMessage("test", [], undefined, { signal: controller.signal })) {}
+		for await (const _ of handler.createMessage("test", [], undefined, { signal: controller.signal })) {
+		}
 		expect(delegate).toHaveBeenCalledWith("test", [], undefined, { signal: controller.signal })
 	})
 })

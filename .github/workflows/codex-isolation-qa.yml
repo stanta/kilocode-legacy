@@ -58,7 +58,7 @@ jobs:
       - name: Diff whitespace check
         if: always()
         run: git diff --check HEAD~1 HEAD
-      - name: Temporary snapshot of Prettier-normalized files
+      - name: Check Codex file formatting
         if: always()
         run: |
           files=(
@@ -92,12 +92,4 @@ jobs:
             docs/codex-oauth-isolation-rollout.md
             .changeset/codex-oauth-request-isolation.md
           )
-          pnpm exec prettier --write "${files[@]}" >/dev/null
-          for file in "${files[@]}"; do
-            if ! git diff --quiet -- "$file"; then
-              printf 'CODEX_FORMAT_BEGIN:%s\n' "$file"
-              base64 -w0 "$file" | fold -w 1200 | sed 's/^/CODEX_FORMAT_CHUNK:/'
-              printf 'CODEX_FORMAT_END:%s\n' "$file"
-            fi
-          done
-
+          pnpm exec prettier --check "${files[@]}"

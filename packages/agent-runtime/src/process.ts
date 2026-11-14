@@ -295,8 +295,10 @@ async function main(): Promise<void> {
 			// Inject provider configuration
 			try {
 				const extensionHost = agent!.getExtensionHost()
-				if (config.providerSettings.apiProvider === "openai-codex" ||
-					config.providerSettings.apiProvider === "virtual-quota-fallback") {
+				if (
+					config.providerSettings.apiProvider === "openai-codex" ||
+					config.providerSettings.apiProvider === "virtual-quota-fallback"
+				) {
 					extensionHost.setCodexTokenProvider(requestCodexSnapshot)
 				}
 				const stateConfig: Partial<ExtensionState> = {
@@ -328,8 +330,9 @@ async function main(): Promise<void> {
 				// Legacy config may include unrelated secrets; never inject copied Codex
 				// refresh credentials into a child, even from an older parent.
 				if (config.secrets) {
-					const safeEntries = Object.entries(config.secrets)
-						.filter(([key]) => key !== "openai-codex-oauth-credentials")
+					const safeEntries = Object.entries(config.secrets).filter(
+						([key]) => key !== "openai-codex-oauth-credentials",
+					)
 					if (safeEntries.length) await extensionHost.injectSecrets(Object.fromEntries(safeEntries))
 				}
 				// kilocode_change end
