@@ -157,6 +157,8 @@ describe("Context window overflow recovery (Task.attemptApiRequest)", () => {
 		return {
 			[Symbol.asyncIterator]: () => ({
 				next: () => Promise.reject(error),
+				// AsyncGenerator contract: Task closes the iterator on first-chunk errors.
+				return: () => Promise.resolve({ done: true, value: undefined }),
 			}),
 		}
 	}

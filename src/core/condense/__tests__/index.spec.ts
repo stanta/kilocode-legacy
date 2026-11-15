@@ -926,9 +926,12 @@ describe("summarizeConversation", () => {
 		}
 
 		// Verify that createMessage was called with the correct prompt
+		// (metadata is not used; request options carry the abort signal)
 		expect(mockApiHandler.createMessage).toHaveBeenCalledWith(
 			expect.stringContaining("Your task is to create a detailed summary of the conversation"),
 			expect.any(Array),
+			undefined,
+			{ signal: undefined },
 		)
 
 		// Check that maybeRemoveImageBlocks was called with the correct messages

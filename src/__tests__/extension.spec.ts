@@ -337,6 +337,12 @@ describe("extension.ts", () => {
 				get: vi.fn().mockReturnValue(undefined),
 				update: vi.fn(),
 			},
+			secrets: {
+				get: vi.fn().mockResolvedValue(undefined),
+				store: vi.fn().mockResolvedValue(undefined),
+				delete: vi.fn().mockResolvedValue(undefined),
+				onDidChange: vi.fn().mockReturnValue({ dispose: vi.fn() }),
+			},
 			subscriptions: [],
 		} as unknown as vscode.ExtensionContext
 

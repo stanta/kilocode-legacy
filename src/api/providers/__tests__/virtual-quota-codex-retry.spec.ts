@@ -19,6 +19,7 @@ describe("Virtual quota wrapper respects Codex request ownership", () => {
 			safeToRetry: true,
 		})
 		const { handler, delegate, adjust } = fakeWrapper(async function* () {
+			yield* [] // kilocode_change - fail before emitting any chunks
 			throw error
 		})
 		await expect(async () => {

@@ -469,8 +469,8 @@ describe("VirtualQuotaFallbackProvider", () => {
 					chunks.push(chunk)
 				}
 
-				// Verify forwarding
-				expect(createMessageMock).toHaveBeenCalledWith(systemPrompt, messages, undefined)
+				// Verify forwarding (metadata and requestOptions are forwarded per the ApiHandler contract)
+				expect(createMessageMock).toHaveBeenCalledWith(systemPrompt, messages, undefined, undefined)
 				expect(chunks).toHaveLength(2)
 
 				// Verify usage tracking

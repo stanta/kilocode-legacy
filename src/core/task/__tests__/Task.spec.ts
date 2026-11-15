@@ -1072,6 +1072,7 @@ describe("Cline", () => {
 					if (attempts === 1) {
 						return (async function* () {
 							try {
+								yield* [] // kilocode_change - fail before emitting any chunks
 								throw error
 							} finally {
 								closed = true
@@ -1119,6 +1120,7 @@ describe("Cline", () => {
 				})
 				const create = vi.spyOn(task.api, "createMessage").mockImplementation(() =>
 					(async function* () {
+						yield* [] // kilocode_change - fail before emitting any chunks
 						throw error
 					})(),
 				)

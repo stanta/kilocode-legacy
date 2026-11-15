@@ -4,7 +4,9 @@ import path from "path"
 import { localPathOrUriToPath, localPathToUri } from "../util/pathToUri"
 
 // Want this outside of the git repository so we can change branches in tests
-const TEST_DIR_PATH = path.join(os.tmpdir(), "testWorkspaceDir")
+// Suffix with the worker pid so parallel vitest workers (filter.test.ts and
+// RootPathContextService.test.ts) don't tear down each other's fixtures.
+const TEST_DIR_PATH = path.join(os.tmpdir(), `testWorkspaceDir-${process.pid}`)
 export const TEST_DIR = localPathToUri(TEST_DIR_PATH) // URI
 
 export function setUpTestDir() {
