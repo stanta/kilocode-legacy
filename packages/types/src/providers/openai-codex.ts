@@ -22,14 +22,17 @@ export const openAiCodexDefaultModelId: OpenAiCodexModelId = "gpt-6.1-sol"
 /**
  * Models currently available through ChatGPT sign-in for Codex.
  *
- * Keep this catalog aligned with https://developers.openai.com/codex/models.
+ * Sources: https://learn.chatgpt.com/docs/models and https://learn.chatgpt.com/docs/pricing.
+ * Older models listed in the current subscription rate card remain available here;
+ * absence from the recommended-model list alone is not evidence of retirement.
  * Costs are 0 because usage is covered by the user's ChatGPT plan.
  */
 export const openAiCodexModels = {
 	// kilocode_change start
 	"gpt-6.1-sol": {
 		maxTokens: 128_000,
-		contextWindow: 1_050_000,
+		// Codex and ChatGPT Work use a 500K default context window for this model.
+		contextWindow: 500_000,
 		supportsNativeTools: true,
 		defaultToolProtocol: "native",
 		includedTools: ["apply_patch"],
@@ -44,6 +47,24 @@ export const openAiCodexModels = {
 		outputPrice: 0,
 		supportsTemperature: false,
 		description: "GPT-6.1 Sol: Near-Astra performance for complex coding and professional work",
+	},
+	"gpt-6.1-terra": {
+		maxTokens: 128_000,
+		contextWindow: 1_050_000,
+		supportsNativeTools: true,
+		defaultToolProtocol: "native",
+		includedTools: ["apply_patch"],
+		excludedTools: ["apply_diff", "write_to_file"],
+		supportsImages: true,
+		supportsComputerUse: true,
+		supportsPromptCache: true,
+		supportsReasoningEffort: ["none", "low", "medium", "high", "xhigh", "max"],
+		reasoningEffort: "medium",
+		supportsVerbosity: true,
+		inputPrice: 0,
+		outputPrice: 0,
+		supportsTemperature: false,
+		description: "GPT-6.1 Terra: Fast, efficient visual reasoning, computer use, and clear writing",
 	},
 	"gpt-6-astra": {
 		maxTokens: 128_000,
@@ -63,6 +84,23 @@ export const openAiCodexModels = {
 		supportsTemperature: false,
 		description: "GPT-6 Astra: OpenAI's most capable model for demanding end-to-end work",
 	},
+	"gpt-6-luna": {
+		maxTokens: 128_000,
+		contextWindow: 1_050_000,
+		supportsNativeTools: true,
+		defaultToolProtocol: "native",
+		includedTools: ["apply_patch"],
+		excludedTools: ["apply_diff", "write_to_file"],
+		supportsImages: true,
+		supportsPromptCache: true,
+		supportsReasoningEffort: ["none", "low", "medium", "high", "xhigh", "max"],
+		reasoningEffort: "medium",
+		supportsVerbosity: true,
+		inputPrice: 0,
+		outputPrice: 0,
+		supportsTemperature: false,
+		description: "GPT-6 Luna: Efficient model for focused, high-volume coding tasks",
+	},
 	"gpt-6-sol": {
 		maxTokens: 128_000,
 		contextWindow: 1_050_000,
@@ -80,23 +118,6 @@ export const openAiCodexModels = {
 		outputPrice: 0,
 		supportsTemperature: false,
 		description: "GPT-6 Sol: Model for complex coding and agentic workflows",
-	},
-	"gpt-6-luna": {
-		maxTokens: 128_000,
-		contextWindow: 1_050_000,
-		supportsNativeTools: true,
-		defaultToolProtocol: "native",
-		includedTools: ["apply_patch"],
-		excludedTools: ["apply_diff", "write_to_file"],
-		supportsImages: true,
-		supportsPromptCache: true,
-		supportsReasoningEffort: ["none", "low", "medium", "high", "xhigh", "max"],
-		reasoningEffort: "medium",
-		supportsVerbosity: true,
-		inputPrice: 0,
-		outputPrice: 0,
-		supportsTemperature: false,
-		description: "GPT-6 Luna: Efficient model for focused, high-volume coding tasks",
 	},
 	"gpt-5.6-sol": {
 		maxTokens: 128_000,

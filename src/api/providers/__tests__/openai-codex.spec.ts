@@ -7,9 +7,10 @@ import { OpenAiCodexHandler } from "../openai-codex"
 describe("OpenAiCodexHandler.getModel", () => {
 	const currentModelIds = [
 		"gpt-6.1-sol",
+		"gpt-6.1-terra",
 		"gpt-6-astra",
-		"gpt-6-sol",
 		"gpt-6-luna",
+		"gpt-6-sol",
 		"gpt-5.6-sol",
 		"gpt-5.6-terra",
 		"gpt-5.6-luna",
@@ -29,7 +30,7 @@ describe("OpenAiCodexHandler.getModel", () => {
 		expect(Object.keys(openAiCodexModels)).toEqual(currentModelIds)
 	})
 
-	it.each(["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"])(
+	it.each(["gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna"])(
 		"should expose current GPT-6 model capabilities: %s",
 		(apiModelId) => {
 			const model = new OpenAiCodexHandler({ apiModelId }).getModel()
@@ -42,6 +43,14 @@ describe("OpenAiCodexHandler.getModel", () => {
 			expect(model.info.supportsReasoningEffort).toContain("max")
 		},
 	)
+
+	it("should use the documented Codex context window for GPT-6.1 Sol", () => {
+		const model = new OpenAiCodexHandler({ apiModelId: "gpt-6.1-sol" }).getModel()
+
+		expect(model.info.contextWindow).toBe(500_000)
+		expect(model.info.maxTokens).toBe(128_000)
+		expect(model.info.supportsReasoningEffort).toEqual(["low", "medium", "high", "xhigh", "max"])
+	})
 
 	it.each([
 		"gpt-5.5",
