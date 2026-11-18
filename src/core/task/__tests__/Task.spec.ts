@@ -1062,6 +1062,7 @@ describe("Cline", () => {
 						context: mockExtensionContext,
 					})
 					vi.spyOn(task as any, "getSystemPrompt").mockResolvedValue("synthetic system prompt")
+					vi.spyOn(task.diffViewProvider, "reset").mockResolvedValue(undefined)
 					return task
 				}
 

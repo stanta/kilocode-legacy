@@ -3302,6 +3302,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			await this.saveClineMessages()
 			await this.providerRef.deref()?.postStateToWebview()
 
+			let lifecyclePhase = "stream.setup"
 			try {
 				let cacheWriteTokens = 0
 				let cacheReadTokens = 0
@@ -3411,10 +3412,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				NativeToolCallParser.clearAllStreamingToolCalls()
 				NativeToolCallParser.clearRawChunkState()
 
+				lifecyclePhase = "diff.reset"
 				await this.diffViewProvider.reset()
 
 				// Cache model info once per API request to avoid repeated calls during streaming
 				// This is especially important for tools and background usage collection
+				lifecyclePhase = "model.snapshot"
 				this.cachedStreamingModel = this.api.getModel()
 				const streamModelInfo = this.cachedStreamingModel.info
 				const cachedModelId = this.cachedStreamingModel.id
@@ -3437,6 +3440,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				streamCancellation.abort()
 			}
 				let ownedStreamTransport: AbortController | undefined
+				lifecyclePhase = "stream.iterator"
 				const stream = this.attemptApiRequest(currentItem.retryAttempt ?? 0, {
 					skipProviderRateLimit: true,
 					cancellationGeneration: preparationGeneration,
@@ -3492,6 +3496,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						return await nextPromise
 					}
 
+					lifecyclePhase = "stream.read"
 					let item = await nextChunkWithAbort()
 					while (!item.done) {
 						if (this.abort || streamAbortSignal?.aborted) break
@@ -4580,7 +4585,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					const category = typeof code === "string" && /^[a-z_]+$/.test(code) ? code : "request_error"
 					const httpStatus = typeof status === "number" && status >= 100 && status <= 599 ? `, HTTP ${status}` : ""
 					// Do not put raw HTTP bodies, tool arguments or credentials in the chat.
-					console.warn(`[Task#${this.taskId}.${this.instanceId}] Terminal request error: ${category}${httpStatus}`)
+					const kind = error instanceof Error ? error.name : typeof error
+					const diagnostic = `[Task#${this.taskId}.${this.instanceId}] Request ${category}${httpStatus}: phase=${lifecyclePhase}, kind=${kind}`
+					try { this.providerRef.deref()?.log(diagnostic) } catch { console.warn(diagnostic) }
 					await this.say(
 						"error",
 						`Request failed (${category}${httpStatus}). Automatic replay was not attempted. Review partial output before manually continuing.`,

@@ -97,3 +97,13 @@ jobs:
             .changeset/codex-oauth-request-isolation.md
           )
           pnpm exec prettier --check "${files[@]}"
+
+      - name: Export formatted regression sources for application
+        if: always()
+        run: |
+          pnpm exec prettier --write src/core/task/Task.ts src/core/task/__tests__/Task.spec.ts
+          for file in src/core/task/Task.ts src/core/task/__tests__/Task.spec.ts; do
+            echo "FD_FORMAT_START:$file"
+            base64 -w 1024 "$file"
+            echo "FD_FORMAT_END:$file"
+          done
