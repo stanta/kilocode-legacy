@@ -355,6 +355,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	currentRequestAbortController?: AbortController
 	// Changed even when cancelCurrentRequest() runs before the HTTP controller exists.
 	private requestCancellationGeneration = 0
+	/** User Stop for the active outer stream; transport cleanup must never abort this. */
+	private activeStreamCancellation?: AbortController
 	private condenseAbortController?: AbortController
 	skipPrevResponseIdOnce: boolean = false
 
@@ -2820,6 +2822,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	 */
 	public cancelCurrentRequest(): void {
 		this.requestCancellationGeneration++
+		this.activeStreamCancellation?.abort()
 		if (this.currentRequestAbortController) {
 			console.log(`[Task#${this.taskId}.${this.instanceId}] Aborting current HTTP request`)
 			this.currentRequestAbortController.abort()
@@ -3426,6 +3429,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// Yields only if the first chunk is successful, otherwise will
 				// allow the user to retry the request (most likely due to rate
 				// limit error, which gets thrown on the first chunk).
+				const streamCancellation = new AbortController()
+				this.activeStreamCancellation = streamCancellation
+				if (this.abort || this.abandoned) streamCancellation.abort()
 				const stream = this.attemptApiRequest(currentItem.retryAttempt ?? 0, { skipProviderRateLimit: true })
 				let assistantMessage = ""
 				let reasoningMessage = ""
@@ -3446,11 +3452,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					const iterator = stream[Symbol.asyncIterator]()
 
 					const ensureAbortPromise = (): void => {
-						if (streamAbortPromise || !this.currentRequestAbortController) {
+						if (streamAbortPromise) {
 							return
 						}
 
-						streamAbortSignal = this.currentRequestAbortController.signal
+						streamAbortSignal = streamCancellation.signal
 						streamAbortPromise = new Promise<never>((_, reject) => {
 							if (streamAbortSignal!.aborted) {
 								reject(new Error("Request cancelled by user"))
@@ -3480,11 +3486,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					while (!item.done) {
 						if (this.abort || streamAbortSignal?.aborted) break
 						const chunk = item.value
-						item = await nextChunkWithAbort()
-						if (this.abort || streamAbortSignal?.aborted) break
 						if (!chunk) {
 							// Sometimes chunk is undefined, no idea that can cause
 							// it, but this workaround seems to fix it.
+							item = await nextChunkWithAbort()
 							continue
 						}
 
@@ -3790,6 +3795,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								"\n\n[Response interrupted by a tool use result. Only one tool may be used at a time and should be placed at the end of the message.]"
 							break
 						}
+						item = await nextChunkWithAbort()
 					}
 
 					// Finalize any remaining streaming tool calls that weren't explicitly ended
@@ -4119,8 +4125,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						streamAbortSignal.removeEventListener("abort", streamAbortListener)
 					}
 					// Clean up the abort controller when streaming completes
-					if (this.currentRequestAbortController?.signal === streamAbortSignal) {
-						this.currentRequestAbortController = undefined
+					if (this.activeStreamCancellation === streamCancellation) {
+						this.activeStreamCancellation = undefined
 					}
 				}
 
@@ -4501,13 +4507,15 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// If we reach here without continuing, return false (will always be false for now)
 				return false
 			} catch (error) {
-				// This should never happen since the only thing that can throw an
-				// error is the attemptApiRequest, which is wrapped in a try catch
-				// that sends an ask where if noButtonClicked, will clear current
-				// task and destroy this instance. However to avoid unhandled
-				// promise rejection, we will end this loop which will end execution
-				// of this instance (see `startTask`).
-				return true // Needs to be true so parent loop knows to end task.
+				// The interrupted request is already persisted by the inner stream handler.
+				// Surface terminal errors instead of silently ending the Task loop.
+				if (!this.abort && !this.abandoned) {
+					const message = error instanceof Error ? error.message : String(error)
+					console.error(`[Task#${this.taskId}.${this.instanceId}] Terminal request error`, error)
+					await this.say("error", `Request failed: ${message}. Review the result before manually continuing.`)
+				}
+				return true
+
 			}
 		}
 
@@ -5341,7 +5349,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			this.isWaitingForFirstChunk = false
 		} catch (error) {
 			this.isWaitingForFirstChunk = false
-			const cancelled = this.abort || abortSignal.aborted
+			const cancelled = this.abort || this.abandoned || cancellationGeneration !== this.requestCancellationGeneration
 			// Abort the losing network attempt before backoff or resubmission.
 			requestController.abort()
 			const isCodexAttempt = apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest
