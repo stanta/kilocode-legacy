@@ -3132,6 +3132,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			const currentItem = stack.pop()!
 			const currentUserContent = currentItem.userContent
 			const currentIncludeFileDetails = currentItem.includeFileDetails
+			// A Stop during asynchronous request preparation must not be forgotten.
+			const preparationGeneration = this.requestCancellationGeneration
 
 			if (this.abort) {
 				throw new Error(
@@ -3431,8 +3433,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// limit error, which gets thrown on the first chunk).
 				const streamCancellation = new AbortController()
 				this.activeStreamCancellation = streamCancellation
-				if (this.abort || this.abandoned) streamCancellation.abort()
-				const stream = this.attemptApiRequest(currentItem.retryAttempt ?? 0, { skipProviderRateLimit: true })
+				if (this.abort || this.abandoned || preparationGeneration !== this.requestCancellationGeneration) {
+				streamCancellation.abort()
+			}
+				let ownedStreamTransport: AbortController | undefined
+				const stream = this.attemptApiRequest(currentItem.retryAttempt ?? 0, {
+					skipProviderRateLimit: true,
+					cancellationGeneration: preparationGeneration,
+					signal: streamCancellation.signal,
+					onTransportCreated: (controller) => { ownedStreamTransport = controller },
+				})
 				let assistantMessage = ""
 				let reasoningMessage = ""
 				let pendingGroundingSources: GroundingSource[] = []
@@ -3859,10 +3869,11 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						total: totalCost,
 					}
 
-					const drainStreamInBackgroundToFindAllUsage = async (apiReqIndex: number) => {
+					const collectRemainingStreamUsage = async (apiReqIndex: number, shouldRead: boolean) => {
 						const timeoutMs = DEFAULT_USAGE_COLLECTION_TIMEOUT_MS
 						const startTime = performance.now()
 						const modelId = getModelId(this.apiConfiguration)
+						const ownedTransport = ownedStreamTransport
 
 						// Local variables to accumulate usage data without affecting the main flow
 						let bgInputTokens = currentTokens.input
@@ -3958,34 +3969,38 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						try {
 							// Continue processing the original stream from where the main loop left off
 							let usageFound = false
-							let chunkCount = 0
 
-							// Use the same iterator that the main loop was using
-							while (!item.done) {
-								// Check for timeout
-								if (performance.now() - startTime > timeoutMs) {
-									console.warn(
-										`[Background Usage Collection] Timed out after ${timeoutMs}ms for model: ${modelId}, processed ${chunkCount} chunks`,
-									)
-									// Clean up the iterator before breaking
-									if (iterator.return) {
-										await iterator.return(undefined)
-									}
-									break
+							// Only the unread tail belongs to the collector. Each read is bounded even
+							// when the remote provider stalls after an early tool exit.
+							const readNextWithDeadline = async (): Promise<IteratorResult<ApiStreamChunk>> => {
+								const remaining = timeoutMs - (performance.now() - startTime)
+								if (remaining <= 0) throw new Error("Usage collection timed out")
+								let timer: ReturnType<typeof setTimeout> | undefined
+								try {
+									return await Promise.race([
+										iterator.next(),
+										new Promise<never>((_, reject) => {
+											timer = setTimeout(() => reject(new Error("Usage collection timed out")), remaining)
+										}),
+									])
+								} finally {
+									if (timer) clearTimeout(timer)
 								}
-
-								const chunk = item.value
-								item = await iterator.next()
-								chunkCount++
-
-								if (chunk && chunk.type === "usage") {
-									usageFound = true
-									bgInputTokens += chunk.inputTokens
-									bgOutputTokens += chunk.outputTokens
-									bgCacheWriteTokens += chunk.cacheWriteTokens ?? 0
-									bgCacheReadTokens += chunk.cacheReadTokens ?? 0
-									bgTotalCost = chunk.totalCost
-									inferenceProvider = chunk.inferenceProvider // kilocode_change
+							}
+							if (shouldRead) {
+								let remainingItem = await readNextWithDeadline()
+								while (!remainingItem.done && !this.abort && !streamAbortSignal?.aborted) {
+									const chunk = remainingItem.value
+																		if (chunk?.type === "usage") {
+										usageFound = true
+										bgInputTokens += chunk.inputTokens
+										bgOutputTokens += chunk.outputTokens
+										bgCacheWriteTokens += chunk.cacheWriteTokens ?? 0
+										bgCacheReadTokens += chunk.cacheReadTokens ?? 0
+										bgTotalCost = chunk.totalCost
+										inferenceProvider = chunk.inferenceProvider
+									}
+									remainingItem = await readNextWithDeadline()
 								}
 							}
 
@@ -4041,28 +4056,78 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								await refreshApiReqMsg(apiReqIndex)
 								// kilocode_change end
 							}
+						} finally {
+							if (shouldRead) {
+								// Never leave an old reader active when the next request starts.
+							if (this.currentRequestAbortController === ownedTransport) ownedTransport?.abort()
+							let closeTimer: ReturnType<typeof setTimeout> | undefined
+							const closed = await Promise.race([
+								iterator.return(undefined).then(() => true, () => false),
+								new Promise<boolean>((resolve) => {
+									closeTimer = setTimeout(() => resolve(false), 3000)
+								}),
+							])
+							if (closeTimer) clearTimeout(closeTimer)
+							if (!closed) throw new Error("Previous stream did not close after usage collection")
 						}
 					}
+					}
 
-					// Start the background task and handle any errors
-					drainStreamInBackgroundToFindAllUsage(lastApiReqIndex).catch((error) => {
-						console.error("Background usage collection failed:", error)
-					})
+					// Normal EOF needs no extra reads; an early exit gives the collector
+					// sole ownership of the remaining iterator before any new request.
+					if (!this.abort && !streamCancellation.signal.aborted) {
+						await collectRemainingStreamUsage(lastApiReqIndex, !item.done)
+					}
 				} catch (error) {
+					// Close this generator before permitting any further dispatch. The
+					// transport is local to the failed attempt, not the user Stop signal.
+					ownedStreamTransport?.abort()
+					if (this.abort || streamCancellation.signal.aborted) {
+						// User Stop must not wait for a provider that ignores abort.
+						void stream.return(undefined).catch(() => {})
+					} else {
+						let closeTimer: ReturnType<typeof setTimeout> | undefined
+						const closed = await Promise.race([
+							stream.return(undefined).then(() => true, () => false),
+							new Promise<boolean>((resolve) => {
+								closeTimer = setTimeout(() => resolve(false), 3000)
+							}),
+						])
+						if (closeTimer) clearTimeout(closeTimer)
+						if (!closed) {
+							console.warn(`[Task#${this.taskId}] Stream did not close; replay refused`)
+							throw error
+						}
+					}
 					// Abandoned happens when extension is no longer waiting for the
 					// Cline instance to finish aborting (error is thrown here when
 					// any function in the for loop throws due to this.abort).
 					if (!this.abandoned) {
 						// Determine cancellation reason
-						const cancelReason: ClineApiReqCancelReason = this.abort ? "user_cancelled" : "streaming_failed"
+						const cancelReason: ClineApiReqCancelReason =
+						this.abort || streamCancellation.signal.aborted ? "user_cancelled" : "streaming_failed"
 
-						const rawErrorMessage = error.message ?? JSON.stringify(serializeError(error), null, 2)
-						const streamingFailedMessage = this.abort
+						const codexError = this.apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest
+						const code = (error as any)?.code
+						const status = (error as any)?.status
+						const safeDetails = [
+							typeof code === "string" && /^[a-z_]+$/.test(code) ? code : "request_error",
+							typeof status === "number" && status >= 100 && status <= 599 ? `HTTP ${status}` : undefined,
+						].filter(Boolean).join(", ")
+						const rawErrorMessage = codexError
+							? `Codex ${safeDetails}` // Typed reason/status, never raw provider error body.
+							: error instanceof Error ? error.message : JSON.stringify(serializeError(error), null, 2)
+						const streamingFailedMessage = cancelReason === "user_cancelled"
 							? undefined
 							: `${t("common:interruption.streamTerminatedByProvider")}: ${rawErrorMessage}`
 
 						// Clean up partial state
-						await abortStream(cancelReason, streamingFailedMessage)
+						try {
+							await abortStream(cancelReason, streamingFailedMessage)
+						} catch (cleanupError) {
+							console.warn(`[Task#${this.taskId}] Failed to persist stream cleanup`, (cleanupError as Error)?.name)
+							throw error // No replay when the interrupted state was not persisted.
+						}
 						// Never replay a Codex request after an interrupted stream,
 						// including reasoning/tool fragments that were not shown as text.
 						if (this.apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest) {
@@ -4510,9 +4575,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// The interrupted request is already persisted by the inner stream handler.
 				// Surface terminal errors instead of silently ending the Task loop.
 				if (!this.abort && !this.abandoned) {
-					const message = error instanceof Error ? error.message : String(error)
-					console.error(`[Task#${this.taskId}.${this.instanceId}] Terminal request error`, error)
-					await this.say("error", `Request failed: ${message}. Review the result before manually continuing.`)
+					const status = (error as any)?.status
+					const code = (error as any)?.code
+					const category = typeof code === "string" && /^[a-z_]+$/.test(code) ? code : "request_error"
+					const httpStatus = typeof status === "number" && status >= 100 && status <= 599 ? `, HTTP ${status}` : ""
+					// Do not put raw HTTP bodies, tool arguments or credentials in the chat.
+					console.warn(`[Task#${this.taskId}.${this.instanceId}] Terminal request error: ${category}${httpStatus}`)
+					await this.say(
+						"error",
+						`Request failed (${category}${httpStatus}). Automatic replay was not attempted. Review partial output before manually continuing.`,
+					)
 				}
 				return true
 
@@ -4912,12 +4984,20 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			/** Number of context-window overflow recovery attempts already made for this request chain. */
 			contextWindowRetryAttempt?: number
 			codexDeadlineAt?: number
+			cancellationGeneration?: number
+			signal?: AbortSignal
+			onTransportCreated?: (controller: AbortController) => void
 		} = {},
 	): ApiStream {
 		// kilocode_change end
-		const cancellationGeneration = this.requestCancellationGeneration
+		const cancellationGeneration = options.cancellationGeneration ?? this.requestCancellationGeneration
 		const refuseCancelledDispatch = () => {
-			if (this.abort || this.abandoned || cancellationGeneration !== this.requestCancellationGeneration) {
+			if (
+				this.abort ||
+				this.abandoned ||
+				options.signal?.aborted ||
+				cancellationGeneration !== this.requestCancellationGeneration
+			) {
 				throw Object.assign(new Error("Request cancelled before dispatch"), {
 					codexRequest: true,
 					code: "cancelled",
@@ -5269,7 +5349,15 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		// Create an AbortController to allow cancelling the request mid-stream
 		this.currentRequestAbortController = new AbortController()
 		const requestController = this.currentRequestAbortController
+		options.onTransportCreated?.(requestController)
 		const abortSignal = requestController.signal
+		// Logical Stop propagates downward, never transport cleanup upward.
+		const forwardStop = () => requestController.abort()
+		if (options.signal?.aborted) forwardStop()
+		else options.signal?.addEventListener("abort", forwardStop, { once: true })
+		abortSignal.addEventListener("abort", () => options.signal?.removeEventListener("abort", forwardStop), {
+			once: true,
+		})
 		// Reset the flag after using it
 		this.skipPrevResponseIdOnce = false
 
@@ -5367,7 +5455,12 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					}),
 				])
 				if (closeTimer) clearTimeout(closeTimer)
-				if (!closed) throw new Error("Previous Codex request did not close; automatic retry refused")
+				if (!closed) {
+					// Keep the original HTTP/OAuth error, but prohibit replay when close is unconfirmed.
+					if (error && typeof error === "object") (error as { safeToRetry?: boolean }).safeToRetry = false
+					console.warn(`[Task#${this.taskId}] Previous Codex transport close unconfirmed; retry refused`)
+					throw error
+				}
 			} else {
 				void closePromise
 			}
@@ -5438,7 +5531,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// the shared first-chunk error path below.
 
 				if (response === "retry_clicked") {
-					yield* this.attemptApiRequest(retryAttempt + 1)
+					yield* this.attemptApiRequest(retryAttempt + 1, options)
 				} else {
 					// Handle other responses or cancellations if necessary
 					// If the user cancels the dialog, we should probably abort.
@@ -5533,7 +5626,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				await this.say("api_req_retried")
 
 				// Delegate generator output from the recursive call.
-				yield* this.attemptApiRequest()
+				yield* this.attemptApiRequest(0, options)
 				return
 			}
 			// kilocode_change start

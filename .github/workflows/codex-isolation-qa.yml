@@ -2,7 +2,7 @@ name: Codex isolation QA
 
 on:
   push:
-    branches: [fix-openai-codex]
+    branches: [fix-openai-codex, new-models-openai]
   workflow_dispatch:
 
 jobs:

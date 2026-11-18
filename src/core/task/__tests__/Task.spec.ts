@@ -1041,6 +1041,191 @@ describe("Cline", () => {
 				expect(task.currentRequestAbortController).toBeUndefined()
 			})
 
+
+			describe("Codex lifecycle through the real Task stream reader", () => {
+				function createCodexTask(autoApprovalEnabled = false) {
+					const config = {
+						...mockApiConfig,
+						apiProvider: "openai-codex" as const,
+						apiModelId: "gpt-5.2-2025-12-11",
+					}
+					mockProvider.getState = vi.fn().mockResolvedValue({
+						apiConfiguration: config,
+						autoApprovalEnabled,
+						mode: "code",
+					})
+					const task = new Task({
+						provider: mockProvider,
+						apiConfiguration: config,
+						task: "synthetic stream lifecycle",
+						startTask: false,
+						context: mockExtensionContext,
+					})
+					vi.spyOn(task as any, "getSystemPrompt").mockResolvedValue("synthetic system prompt")
+					return task
+				}
+
+				const prompt = [{ type: "text" as const, text: "Synthetic request" }]
+
+				it("preserves a first-chunk HTTP failure and surfaces a terminal error without leaking its body", async () => {
+					const task = createCodexTask()
+					const originalError = Object.assign(new Error("SENSITIVE_SYNTHETIC_ERROR_BODY"), {
+						codexRequest: true,
+						code: "auth",
+						status: 403,
+						safeToRetry: false,
+					})
+					const createMessage = vi.spyOn(task.api, "createMessage").mockImplementation(() =>
+						(async function* () {
+							yield* [] // fail before the first chunk
+							throw originalError
+						})(),
+					)
+					expect(await task.recursivelyMakeClineRequests(prompt)).toBe(true)
+					expect(createMessage).toHaveBeenCalledTimes(1)
+					const apiRequest = task.clineMessages.find((message) => message.say === "api_req_started")
+					expect(JSON.parse(apiRequest?.text ?? "{}")).toMatchObject({
+						cancelReason: "streaming_failed",
+					})
+					const recorded = JSON.stringify(task.clineMessages)
+					expect(recorded).toContain("403")
+					expect(recorded).not.toContain("SENSITIVE_SYNTHETIC_ERROR_BODY")
+					expect(task.isStreaming).toBe(false)
+				})
+
+				it("delivers final text and usage through EOF before the next Task turn", async () => {
+					const task = createCodexTask()
+					const terminal = Object.assign(new Error("terminal request"), {
+						codexRequest: true,
+						code: "auth",
+						status: 403,
+						safeToRetry: false,
+					})
+					let requests = 0
+					const createMessage = vi.spyOn(task.api, "createMessage").mockImplementation(() => {
+						requests++
+						return (async function* () {
+							if (requests === 1) {
+								yield { type: "reasoning" as const, text: "Synthetic reasoning" }
+								yield { type: "text" as const, text: "Final text fragment" }
+								yield { type: "usage" as const, inputTokens: 7, outputTokens: 3, totalCost: 0 }
+								return
+							}
+							throw terminal
+						})()
+					})
+					expect(await task.recursivelyMakeClineRequests(prompt)).toBe(true)
+					expect(createMessage).toHaveBeenCalledTimes(2)
+					expect(JSON.stringify(task.apiConversationHistory)).toContain("Final text fragment")
+					const firstRequest = task.clineMessages.find((message) => message.say === "api_req_started")
+					expect(JSON.parse(firstRequest?.text ?? "{}").tokensOut).toBe(3)
+					expect(JSON.stringify(task.clineMessages)).not.toContain("Request cancelled by user")
+				})
+
+				it("closes an explicitly retryable 429 before its successful Task attempt", async () => {
+					const task = createCodexTask(true)
+					const retryable = Object.assign(new Error("rate limit"), {
+						codexRequest: true,
+						code: "http",
+						status: 429,
+						safeToRetry: true,
+					})
+					const terminal = Object.assign(new Error("terminal"), {
+						codexRequest: true,
+						code: "auth",
+						safeToRetry: false,
+					})
+					let requests = 0
+					let firstClosed = false
+					const createMessage = vi.spyOn(task.api, "createMessage").mockImplementation(() => {
+						requests++
+						if (requests === 1) {
+							return (async function* () {
+								try {
+									yield* []
+									throw retryable
+								} finally {
+									firstClosed = true
+								}
+							})()
+						}
+						if (requests === 2 && !firstClosed) throw new Error("unsafe overlapping retry")
+						return (async function* () {
+							if (requests === 2) {
+								yield { type: "text" as const, text: "Retried successfully" }
+								return
+							}
+							throw terminal
+						})()
+					})
+					vi.spyOn(task as any, "backoffAndAnnounce").mockResolvedValue(undefined)
+					expect(await task.recursivelyMakeClineRequests(prompt)).toBe(true)
+					expect(createMessage).toHaveBeenCalledTimes(3)
+					expect(firstClosed).toBe(true)
+					expect(JSON.stringify(task.apiConversationHistory)).toContain("Retried successfully")
+				})
+
+
+				it("never replays Codex after a partial response even when the later HTTP error is retryable", async () => {
+					const task = createCodexTask(true)
+					const error = Object.assign(new Error("partially accepted"), {
+						codexRequest: true,
+						code: "http",
+						status: 429,
+						safeToRetry: true,
+					})
+					const createMessage = vi.spyOn(task.api, "createMessage").mockImplementation(() =>
+						(async function* () {
+							yield { type: "text" as const, text: "Accepted partial output" }
+							throw error
+						})(),
+					)
+					const backoff = vi.spyOn(task as any, "backoffAndAnnounce").mockResolvedValue(undefined)
+					expect(await task.recursivelyMakeClineRequests(prompt)).toBe(true)
+					expect(createMessage).toHaveBeenCalledTimes(1)
+					expect(backoff).not.toHaveBeenCalled()
+					expect(JSON.stringify(task.clineMessages)).toContain("Accepted partial output")
+					expect(task.isStreaming).toBe(false)
+				})
+
+				it("stops a pending first read through the logical Task signal", async () => {
+					const task = createCodexTask()
+					let requestSignal: AbortSignal | undefined
+					const createMessage = vi.spyOn(task.api, "createMessage").mockImplementation((_system, _history, _metadata, options) => {
+						requestSignal = options?.signal
+						return (async function* () {
+							await new Promise<void>((_resolve, reject) => {
+								if (requestSignal?.aborted) return reject(new Error("stopped"))
+								requestSignal?.addEventListener("abort", () => reject(new Error("stopped")), { once: true })
+							})
+							yield* []
+						})()
+					})
+					const running = task.recursivelyMakeClineRequests(prompt)
+					await vi.waitFor(() => expect(createMessage).toHaveBeenCalledTimes(1), { timeout: 5000 })
+					task.abort = true
+					task.cancelCurrentRequest()
+					expect(await running).toBe(true)
+					expect(requestSignal?.aborted).toBe(true)
+					expect(createMessage).toHaveBeenCalledTimes(1)
+				})
+
+				it("refuses dispatch when Stop occurs during outer Task preparation", async () => {
+					const task = createCodexTask()
+					let finishPreparation: (() => void) | undefined
+					vi.spyOn(task as any, "maybeWaitForProviderRateLimit").mockImplementation(
+						() => new Promise<void>((resolve) => { finishPreparation = resolve }),
+					)
+					const createMessage = vi.spyOn(task.api, "createMessage")
+					const running = task.recursivelyMakeClineRequests(prompt)
+					await vi.waitFor(() => expect(finishPreparation).toBeDefined())
+					task.cancelCurrentRequest()
+					finishPreparation!()
+					expect(await running).toBe(true)
+					expect(createMessage).not.toHaveBeenCalled()
+				})
+			})
+
 			it("retries an explicit pre-response Codex 429 only after closing the previous iterator", async () => {
 				const codex = {
 					...mockApiConfig,
