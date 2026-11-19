@@ -1041,7 +1041,6 @@ describe("Cline", () => {
 				expect(task.currentRequestAbortController).toBeUndefined()
 			})
 
-
 			describe("Codex lifecycle through the real Task stream reader", () => {
 				function createCodexTask(autoApprovalEnabled = false) {
 					const config = {
@@ -1169,7 +1168,6 @@ describe("Cline", () => {
 					expect(JSON.stringify(task.apiConversationHistory)).toContain("Retried successfully")
 				})
 
-
 				it("never replays Codex after a partial response even when the later HTTP error is retryable", async () => {
 					const task = createCodexTask(true)
 					const error = Object.assign(new Error("partially accepted"), {
@@ -1195,16 +1193,20 @@ describe("Cline", () => {
 				it("stops a pending first read through the logical Task signal", async () => {
 					const task = createCodexTask()
 					let requestSignal: AbortSignal | undefined
-					const createMessage = vi.spyOn(task.api, "createMessage").mockImplementation((_system, _history, _metadata, options) => {
-						requestSignal = options?.signal
-						return (async function* () {
-							await new Promise<void>((_resolve, reject) => {
-								if (requestSignal?.aborted) return reject(new Error("stopped"))
-								requestSignal?.addEventListener("abort", () => reject(new Error("stopped")), { once: true })
-							})
-							yield* []
-						})()
-					})
+					const createMessage = vi
+						.spyOn(task.api, "createMessage")
+						.mockImplementation((_system, _history, _metadata, options) => {
+							requestSignal = options?.signal
+							return (async function* () {
+								await new Promise<void>((_resolve, reject) => {
+									if (requestSignal?.aborted) return reject(new Error("stopped"))
+									requestSignal?.addEventListener("abort", () => reject(new Error("stopped")), {
+										once: true,
+									})
+								})
+								yield* []
+							})()
+						})
 					const running = task.recursivelyMakeClineRequests(prompt)
 					await vi.waitFor(() => expect(createMessage).toHaveBeenCalledTimes(1), { timeout: 5000 })
 					task.abort = true
@@ -1247,13 +1249,22 @@ describe("Cline", () => {
 				it("refuses a safe-to-retry error if the first provider iterator cannot close", async () => {
 					const task = createCodexTask(true)
 					const rateLimit = Object.assign(new Error("synthetic 429"), {
-						codexRequest: true, code: "http", status: 429, safeToRetry: true,
+						codexRequest: true,
+						code: "http",
+						status: 429,
+						safeToRetry: true,
 					})
 					const stream = {
-						async next(): Promise<IteratorResult<ApiStreamChunk>> { throw rateLimit },
-						async return(): Promise<IteratorResult<ApiStreamChunk>> { return new Promise(() => {}) },
-						[Symbol.asyncIterator]() { return this },
-					} as AsyncGenerator<ApiStreamChunk>
+						async next(): Promise<IteratorResult<ApiStreamChunk>> {
+							throw rateLimit
+						},
+						async return(): Promise<IteratorResult<ApiStreamChunk>> {
+							return new Promise(() => {})
+						},
+						[Symbol.asyncIterator]() {
+							return this
+						},
+					} as unknown as AsyncGenerator<ApiStreamChunk>
 					const createMessage = vi.spyOn(task.api, "createMessage").mockReturnValue(stream)
 					const backoff = vi.spyOn(task as any, "backoffAndAnnounce").mockResolvedValue(undefined)
 					expect(await task.recursivelyMakeClineRequests(prompt)).toBe(true)
@@ -1266,7 +1277,10 @@ describe("Cline", () => {
 					const task = createCodexTask()
 					let finishPreparation: (() => void) | undefined
 					vi.spyOn(task as any, "maybeWaitForProviderRateLimit").mockImplementation(
-						() => new Promise<void>((resolve) => { finishPreparation = resolve }),
+						() =>
+							new Promise<void>((resolve) => {
+								finishPreparation = resolve
+							}),
 					)
 					const createMessage = vi.spyOn(task.api, "createMessage")
 					const running = task.recursivelyMakeClineRequests(prompt)

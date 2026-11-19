@@ -40,12 +40,19 @@ export function logCodexLifecycle(event: CodexLifecycleEvent): void {
 					requestId: safeId(event.requestId),
 					taskId: safeId(event.taskId),
 					instanceId: safeId(event.instanceId),
-					attempt: typeof event.attempt === "number" && Number.isSafeInteger(event.attempt) && event.attempt >= 0
-						? event.attempt
-						: undefined,
-					httpStatus: event.httpStatus && event.httpStatus >= 100 && event.httpStatus <= 599 ? event.httpStatus : undefined,
+					attempt:
+						typeof event.attempt === "number" && Number.isSafeInteger(event.attempt) && event.attempt >= 0
+							? event.attempt
+							: undefined,
+					httpStatus:
+						event.httpStatus && event.httpStatus >= 100 && event.httpStatus <= 599
+							? event.httpStatus
+							: undefined,
 					code: event.code && /^[a-z_]{1,40}$/.test(event.code) ? event.code : undefined,
-					elapsedMs: typeof event.elapsedMs === "number" && Number.isFinite(event.elapsedMs) ? Math.round(event.elapsedMs) : undefined,
+					elapsedMs:
+						typeof event.elapsedMs === "number" && Number.isFinite(event.elapsedMs)
+							? Math.round(event.elapsedMs)
+							: undefined,
 					waiting: event.waiting,
 					authenticated: event.authenticated,
 				}),

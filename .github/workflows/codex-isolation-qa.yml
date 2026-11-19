@@ -27,6 +27,9 @@ jobs:
       - name: Check agent runtime types
         if: always()
         run: pnpm --dir packages/agent-runtime exec tsc --noEmit
+      - name: Check webview types
+        if: always()
+        run: pnpm --dir webview-ui check-types
       - name: Run Codex OAuth, provider, Task and fallback regressions
         if: always()
         run: |
@@ -102,26 +105,6 @@ jobs:
             packages/agent-runtime/src/services/__tests__/codex-token-client.worker.ts
             docs/codex-oauth-isolation-rollout.md
             .changeset/codex-oauth-request-isolation.md
+            .changeset/codex-stream-cancellation-lifecycle.md
           )
           pnpm exec prettier --check "${files[@]}"
-
-      - name: Export formatted changed sources for applying Prettier
-        if: always()
-        run: |
-          files=(
-            src/core/task/Task.ts
-            src/core/task/__tests__/Task.spec.ts
-            src/api/index.ts
-            src/api/providers/openai-codex.ts
-            src/api/providers/__tests__/openai-codex-http-cancel.spec.ts
-            src/extension.ts
-            src/integrations/openai-codex/diagnostics.ts
-            src/integrations/openai-codex/__tests__/diagnostics.spec.ts
-            webview-ui/src/components/chat/__tests__/ChatView.spec.tsx
-          )
-          pnpm exec prettier --write "${files[@]}"
-          for file in "${files[@]}"; do
-            echo "FD_FORMAT_START:${file}"
-            base64 -w 1024 "${file}"
-            echo "FD_FORMAT_END:${file}"
-          done

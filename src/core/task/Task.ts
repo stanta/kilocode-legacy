@@ -3138,8 +3138,14 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			const operationId = uuidv7()
 			const logTaskPhase = (phase: string, details: { code?: string; httpStatus?: number } = {}) => {
 				if (this.apiConfiguration?.apiProvider === "openai-codex") {
-					logCodexLifecycle({ phase, operationId, taskId: this.taskId, instanceId: this.instanceId,
-						attempt: currentItem.retryAttempt ?? 0, ...details })
+					logCodexLifecycle({
+						phase,
+						operationId,
+						taskId: this.taskId,
+						instanceId: this.instanceId,
+						attempt: currentItem.retryAttempt ?? 0,
+						...details,
+					})
 				}
 			}
 			logTaskPhase("task.prepare.start")
@@ -3446,8 +3452,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				const streamCancellation = new AbortController()
 				this.activeStreamCancellation = streamCancellation
 				if (this.abort || this.abandoned || preparationGeneration !== this.requestCancellationGeneration) {
-				streamCancellation.abort()
-			}
+					streamCancellation.abort()
+				}
 				let ownedStreamTransport: AbortController | undefined
 				let cleanupUnconfirmed = false
 				lifecyclePhase = "stream.iterator"
@@ -3457,7 +3463,9 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					cancellationGeneration: preparationGeneration,
 					signal: streamCancellation.signal,
 					operationId,
-					onTransportCreated: (controller) => { ownedStreamTransport = controller },
+					onTransportCreated: (controller) => {
+						ownedStreamTransport = controller
+					},
 				})
 				let assistantMessage = ""
 				let reasoningMessage = ""
@@ -3999,7 +4007,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 									iterator.next(),
 									stopped,
 									new Promise<never>((_, reject) => {
-										timer = setTimeout(() => reject(new Error("Usage collection timed out")), remaining)
+										timer = setTimeout(
+											() => reject(new Error("Usage collection timed out")),
+											remaining,
+										)
 									}),
 								])
 							} finally {
@@ -4035,16 +4046,22 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							try {
 								if (!this.abort && !streamCancellation.signal.aborted) {
 									if (
-										usageFound || bgInputTokens > 0 || bgOutputTokens > 0 ||
-										bgCacheWriteTokens > 0 || bgCacheReadTokens > 0
+										usageFound ||
+										bgInputTokens > 0 ||
+										bgOutputTokens > 0 ||
+										bgCacheWriteTokens > 0 ||
+										bgCacheReadTokens > 0
 									) {
-										await captureUsageData({
-											input: bgInputTokens,
-											output: bgOutputTokens,
-											cacheWrite: bgCacheWriteTokens,
-											cacheRead: bgCacheReadTokens,
-											total: bgTotalCost,
-										}, apiReqIndex)
+										await captureUsageData(
+											{
+												input: bgInputTokens,
+												output: bgOutputTokens,
+												cacheWrite: bgCacheWriteTokens,
+												cacheRead: bgCacheReadTokens,
+												total: bgTotalCost,
+											},
+											apiReqIndex,
+										)
 									} else {
 										usageMissing = true
 										await refreshApiReqMsg(apiReqIndex)
@@ -4059,7 +4076,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 									} else {
 										let closeTimer: ReturnType<typeof setTimeout> | undefined
 										const closed = await Promise.race([
-											iterator.return(undefined).then(() => true, () => false),
+											iterator.return(undefined).then(
+												() => true,
+												() => false,
+											),
 											new Promise<boolean>((resolve) => {
 												closeTimer = setTimeout(() => resolve(false), 3000)
 											}),
@@ -4073,7 +4093,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 								}
 							}
 						}
-
 					}
 
 					logTaskPhase(item.done ? "task.eof" : "task.early_exit")
@@ -4094,7 +4113,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					} else if (!cleanupUnconfirmed) {
 						let closeTimer: ReturnType<typeof setTimeout> | undefined
 						const closed = await Promise.race([
-							stream.return(undefined).then(() => true, () => false),
+							stream.return(undefined).then(
+								() => true,
+								() => false,
+							),
 							new Promise<boolean>((resolve) => {
 								closeTimer = setTimeout(() => resolve(false), 3000)
 							}),
@@ -4111,27 +4133,36 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					if (!this.abandoned) {
 						// Determine cancellation reason
 						const cancelReason: ClineApiReqCancelReason =
-						this.abort || streamCancellation.signal.aborted ? "user_cancelled" : "streaming_failed"
+							this.abort || streamCancellation.signal.aborted ? "user_cancelled" : "streaming_failed"
 
-						const codexError = this.apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest
+						const codexError =
+							this.apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest
 						const code = (error as any)?.code
 						const status = (error as any)?.status
 						const safeDetails = [
 							typeof code === "string" && /^[a-z_]+$/.test(code) ? code : "request_error",
 							typeof status === "number" && status >= 100 && status <= 599 ? `HTTP ${status}` : undefined,
-						].filter(Boolean).join(", ")
+						]
+							.filter(Boolean)
+							.join(", ")
 						const rawErrorMessage = codexError
 							? `Codex ${safeDetails}` // Typed reason/status, never raw provider error body.
-							: error instanceof Error ? error.message : JSON.stringify(serializeError(error), null, 2)
-						const streamingFailedMessage = cancelReason === "user_cancelled"
-							? undefined
-							: `${t("common:interruption.streamTerminatedByProvider")}: ${rawErrorMessage}`
+							: error instanceof Error
+								? error.message
+								: JSON.stringify(serializeError(error), null, 2)
+						const streamingFailedMessage =
+							cancelReason === "user_cancelled"
+								? undefined
+								: `${t("common:interruption.streamTerminatedByProvider")}: ${rawErrorMessage}`
 
 						// Clean up partial state
 						try {
 							await abortStream(cancelReason, streamingFailedMessage)
 						} catch (cleanupError) {
-							console.warn(`[Task#${this.taskId}] Failed to persist stream cleanup`, (cleanupError as Error)?.name)
+							console.warn(
+								`[Task#${this.taskId}] Failed to persist stream cleanup`,
+								(cleanupError as Error)?.name,
+							)
 							throw error // No replay when the interrupted state was not persisted.
 						}
 						logTaskPhase("task.cleanup.end")
@@ -4593,11 +4624,16 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					const status = (error as any)?.status
 					const code = (error as any)?.code
 					const category = typeof code === "string" && /^[a-z_]+$/.test(code) ? code : "request_error"
-					const httpStatus = typeof status === "number" && status >= 100 && status <= 599 ? `, HTTP ${status}` : ""
+					const httpStatus =
+						typeof status === "number" && status >= 100 && status <= 599 ? `, HTTP ${status}` : ""
 					// Do not put raw HTTP bodies, tool arguments or credentials in the chat.
 					const kind = error instanceof Error ? error.name : typeof error
 					const diagnostic = `[Task#${this.taskId}.${this.instanceId}] Request ${category}${httpStatus}: phase=${lifecyclePhase}, kind=${kind}`
-					try { this.providerRef.deref()?.log(diagnostic) } catch { console.warn(diagnostic) }
+					try {
+						this.providerRef.deref()?.log(diagnostic)
+					} catch {
+						console.warn(diagnostic)
+					}
 					await this.say(
 						"error",
 						`Request failed (${category}${httpStatus}). The request may have reached the provider. Check any partial output and tool effects before explicitly resuming.`,
@@ -4611,7 +4647,6 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					}
 				}
 				return true
-
 			}
 		}
 
@@ -5419,14 +5454,24 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 		// The provider accepts reasoning items alongside standard messages; cast to the expected parameter type.
 		if (apiConfiguration?.apiProvider === "openai-codex") {
-			logCodexLifecycle({ phase: "task.dispatch", operationId: options.operationId,
-				taskId: this.taskId, instanceId: this.instanceId, attempt: retryAttempt })
+			logCodexLifecycle({
+				phase: "task.dispatch",
+				operationId: options.operationId,
+				taskId: this.taskId,
+				instanceId: this.instanceId,
+				attempt: retryAttempt,
+			})
 		}
 		const stream = this.api.createMessage(
 			systemPrompt,
 			cleanConversationHistory as unknown as Anthropic.Messages.MessageParam[],
 			metadata,
-			{ signal: abortSignal, deadlineAt: codexDeadlineAt, operationId: options.operationId, attempt: retryAttempt },
+			{
+				signal: abortSignal,
+				deadlineAt: codexDeadlineAt,
+				operationId: options.operationId,
+				attempt: retryAttempt,
+			},
 		)
 		const iterator = stream[Symbol.asyncIterator]()
 
@@ -5466,7 +5511,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			this.isWaitingForFirstChunk = false
 		} catch (error) {
 			this.isWaitingForFirstChunk = false
-			const cancelled = this.abort || this.abandoned || cancellationGeneration !== this.requestCancellationGeneration
+			const cancelled =
+				this.abort || this.abandoned || cancellationGeneration !== this.requestCancellationGeneration
 			// Abort the losing network attempt before backoff or resubmission.
 			requestController.abort()
 			const isCodexAttempt = apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest

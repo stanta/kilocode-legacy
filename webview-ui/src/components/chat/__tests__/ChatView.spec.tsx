@@ -359,12 +359,12 @@ describe("ChatView - terminal Codex recovery", () => {
 			],
 		})
 		await waitFor(() => {
+			expect(getByText("chat:resumeTask.title")).toBeInTheDocument()
 			expect(getByTestId("chat-textarea").querySelector("input")).toHaveAttribute(
 				"data-sending-disabled",
 				"false",
 			)
 		})
-		expect(getByText("chat:resumeTask.title")).toBeInTheDocument()
 	})
 })
 

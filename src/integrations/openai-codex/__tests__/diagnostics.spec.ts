@@ -32,7 +32,9 @@ describe("Codex persistent lifecycle diagnostics", () => {
 	})
 
 	it("does not affect request execution when the output channel is unavailable", () => {
-		setCodexDiagnosticOutput(() => { throw new Error("closed output") })
+		setCodexDiagnosticOutput(() => {
+			throw new Error("closed output")
+		})
 		expect(() => logCodexLifecycle({ phase: "task.stop", taskId: "test-task" })).not.toThrow()
 	})
 })
