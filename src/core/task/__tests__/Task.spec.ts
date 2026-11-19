@@ -1092,6 +1092,8 @@ describe("Cline", () => {
 					expect(recorded).toContain("403")
 					expect(recorded).not.toContain("SENSITIVE_SYNTHETIC_ERROR_BODY")
 					expect(task.isStreaming).toBe(false)
+					expect(task.abortReason).toBe("streaming_failed")
+					expect(task.abort).toBe(true)
 				})
 
 				it("delivers final text and usage through EOF before the next Task turn", async () => {
@@ -1117,6 +1119,7 @@ describe("Cline", () => {
 					})
 					expect(await task.recursivelyMakeClineRequests(prompt)).toBe(true)
 					expect(createMessage).toHaveBeenCalledTimes(2)
+					expect(createMessage.mock.calls[0]?.[3]?.operationId).toMatch(/^[0-9a-f-]+$/i)
 					expect(JSON.stringify(task.apiConversationHistory)).toContain("Final text fragment")
 					const firstRequest = task.clineMessages.find((message) => message.say === "api_req_started")
 					expect(JSON.parse(firstRequest?.text ?? "{}").tokensOut).toBe(3)
@@ -1210,6 +1213,54 @@ describe("Cline", () => {
 					expect(requestSignal?.aborted).toBe(true)
 					expect(createMessage).toHaveBeenCalledTimes(1)
 				})
+
+				it("interrupts a stalled usage drain promptly on Stop, without another dispatch", async () => {
+					const task = createCodexTask()
+					const secondRead = vi.fn()
+					const createMessage = vi.spyOn(task.api, "createMessage").mockImplementation(() =>
+						(async function* () {
+							task.didRejectTool = true
+							yield { type: "text" as const, text: "Partial before rejected tool" }
+							secondRead()
+							await new Promise<void>(() => {}) // Provider deliberately ignores transport abort.
+						})(),
+					)
+					const running = task.recursivelyMakeClineRequests(prompt)
+					await vi.waitFor(() => expect(secondRead).toHaveBeenCalledOnce(), { timeout: 3000 })
+					task.cancelCurrentRequest()
+					let timer: ReturnType<typeof setTimeout> | undefined
+					try {
+						const bounded = Promise.race([
+							running,
+							new Promise<never>((_, reject) => {
+								timer = setTimeout(() => reject(new Error("Stop did not interrupt usage drain")), 1500)
+							}),
+						])
+						expect(await bounded).toBe(true)
+					} finally {
+						if (timer) clearTimeout(timer)
+					}
+					expect(task.abortReason).toBe("user_cancelled")
+					expect(createMessage).toHaveBeenCalledTimes(1)
+				}, 10_000)
+
+				it("refuses a safe-to-retry error if the first provider iterator cannot close", async () => {
+					const task = createCodexTask(true)
+					const rateLimit = Object.assign(new Error("synthetic 429"), {
+						codexRequest: true, code: "http", status: 429, safeToRetry: true,
+					})
+					const stream = {
+						async next(): Promise<IteratorResult<ApiStreamChunk>> { throw rateLimit },
+						async return(): Promise<IteratorResult<ApiStreamChunk>> { return new Promise(() => {}) },
+						[Symbol.asyncIterator]() { return this },
+					} as AsyncGenerator<ApiStreamChunk>
+					const createMessage = vi.spyOn(task.api, "createMessage").mockReturnValue(stream)
+					const backoff = vi.spyOn(task as any, "backoffAndAnnounce").mockResolvedValue(undefined)
+					expect(await task.recursivelyMakeClineRequests(prompt)).toBe(true)
+					expect(createMessage).toHaveBeenCalledTimes(1)
+					expect(backoff).not.toHaveBeenCalled()
+					expect(task.abortReason).toBe("streaming_failed")
+				}, 15_000)
 
 				it("refuses dispatch when Stop occurs during outer Task preparation", async () => {
 					const task = createCodexTask()

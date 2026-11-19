@@ -315,6 +315,59 @@ const renderChatView = (props: Partial<ChatViewProps> = {}) => {
 	)
 }
 
+describe("ChatView - terminal Codex recovery", () => {
+	beforeEach(() => vi.clearAllMocks())
+
+	it("restores the explicit resume action instead of a permanently blocked spinner", async () => {
+		const { getByTestId, getByText } = renderChatView()
+		const ts = Date.now()
+		const task = { type: "say" as const, say: "task", text: "Synthetic request", ts: ts - 3 }
+		const request = {
+			type: "say" as const,
+			say: "api_req_started",
+			text: JSON.stringify({ apiProtocol: "openai", cancelReason: "streaming_failed" }),
+			ts: ts - 2,
+		}
+		const error = { type: "say" as const, say: "error", text: "Request failed (auth, HTTP 403)", ts: ts - 1 }
+
+		mockPostMessage({ clineMessages: [task, request] })
+		const input = getByTestId("chat-textarea").querySelector("input")!
+		await waitFor(() => expect(input).toHaveAttribute("data-sending-disabled", "true"))
+
+		mockPostMessage({ clineMessages: [task, request, error, { type: "ask", ask: "resume_task", ts }] })
+		await waitFor(() => expect(input).toHaveAttribute("data-sending-disabled", "false"))
+		expect(getByText("chat:resumeTask.title")).toBeInTheDocument()
+		expect(vscode.postMessage).not.toHaveBeenCalledWith(
+			expect.objectContaining({ type: "askResponse", askResponse: "yesButtonClicked" }),
+		)
+	})
+
+	it("keeps the manual resume option after reloading a failed task", async () => {
+		const { getByTestId, getByText } = renderChatView()
+		mockPostMessage({
+			resumeTaskId: "synthetic-task",
+			clineMessages: [
+				{ type: "say", say: "task", text: "Synthetic request", ts: 1 },
+				{
+					type: "say",
+					say: "api_req_started",
+					text: JSON.stringify({ cancelReason: "streaming_failed", cost: 0 }),
+					ts: 2,
+				},
+				{ type: "say", say: "error", text: "Check partial output before resuming", ts: 3 },
+				{ type: "ask", ask: "resume_task", ts: 4 },
+			],
+		})
+		await waitFor(() => {
+			expect(getByTestId("chat-textarea").querySelector("input")).toHaveAttribute(
+				"data-sending-disabled",
+				"false",
+			)
+		})
+		expect(getByText("chat:resumeTask.title")).toBeInTheDocument()
+	})
+})
+
 describe("ChatView - Sound Playing Tests", () => {
 	beforeEach(() => vi.clearAllMocks())
 

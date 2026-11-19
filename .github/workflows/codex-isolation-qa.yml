@@ -40,8 +40,12 @@ jobs:
             api/providers/__tests__/openai-codex-http-cancel.spec.ts \
             api/providers/__tests__/virtual-quota-codex-retry.spec.ts \
             core/task/__tests__/Task.spec.ts \
+            integrations/openai-codex/__tests__/diagnostics.spec.ts \
             core/kilocode/agent-manager/__tests__/RuntimeProcessHandler.codex-ipc.spec.ts \
             core/kilocode/agent-manager/__tests__/RuntimeProcessHandler.spec.ts
+      - name: Run terminal Codex resume UI regressions
+        if: always()
+        run: pnpm --dir webview-ui exec vitest run src/components/chat/__tests__/ChatView.spec.tsx
       - name: Run real IPC child-process tests
         if: always()
         run: |
@@ -51,7 +55,7 @@ jobs:
       - name: Lint changed extension implementation
         if: always()
         run: |
-          pnpm --dir src exec eslint             integrations/openai-codex/oauth.ts             integrations/openai-codex/oauth-refresh-lock.ts             integrations/openai-codex/storage-probe.ts             api/providers/openai-codex.ts             api/providers/virtual-quota-fallback.ts             api/index.ts             core/condense/index.ts             core/task/Task.ts             core/kilocode/agent-manager/RuntimeProcessHandler.ts             core/kilocode/agent-manager/AgentManagerProvider.ts
+          pnpm --dir src exec eslint             integrations/openai-codex/oauth.ts             integrations/openai-codex/oauth-refresh-lock.ts             integrations/openai-codex/storage-probe.ts             api/providers/openai-codex.ts             api/providers/virtual-quota-fallback.ts             api/index.ts             core/condense/index.ts             core/task/Task.ts             integrations/openai-codex/diagnostics.ts             core/kilocode/agent-manager/RuntimeProcessHandler.ts             core/kilocode/agent-manager/AgentManagerProvider.ts
       - name: Lint changed agent runtime implementation
         if: always()
         run: |
@@ -76,6 +80,9 @@ jobs:
             src/api/providers/virtual-quota-fallback.ts
             src/api/index.ts
             src/core/task/Task.ts
+            src/integrations/openai-codex/diagnostics.ts
+            src/integrations/openai-codex/__tests__/diagnostics.spec.ts
+            webview-ui/src/components/chat/__tests__/ChatView.spec.tsx
             src/core/task/__tests__/Task.spec.ts
             src/core/condense/index.ts
             src/core/kilocode/agent-manager/RuntimeProcessHandler.ts
@@ -98,12 +105,23 @@ jobs:
           )
           pnpm exec prettier --check "${files[@]}"
 
-      - name: Export formatted regression sources for application
+      - name: Export formatted changed sources for applying Prettier
         if: always()
         run: |
-          pnpm exec prettier --write src/core/task/Task.ts src/core/task/__tests__/Task.spec.ts
-          for file in src/core/task/Task.ts src/core/task/__tests__/Task.spec.ts; do
-            echo "FD_FORMAT_START:$file"
-            base64 -w 1024 "$file"
-            echo "FD_FORMAT_END:$file"
+          files=(
+            src/core/task/Task.ts
+            src/core/task/__tests__/Task.spec.ts
+            src/api/index.ts
+            src/api/providers/openai-codex.ts
+            src/api/providers/__tests__/openai-codex-http-cancel.spec.ts
+            src/extension.ts
+            src/integrations/openai-codex/diagnostics.ts
+            src/integrations/openai-codex/__tests__/diagnostics.spec.ts
+            webview-ui/src/components/chat/__tests__/ChatView.spec.tsx
+          )
+          pnpm exec prettier --write "${files[@]}"
+          for file in "${files[@]}"; do
+            echo "FD_FORMAT_START:${file}"
+            base64 -w 1024 "${file}"
+            echo "FD_FORMAT_END:${file}"
           done

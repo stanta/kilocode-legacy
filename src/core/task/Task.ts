@@ -66,6 +66,7 @@ import { ApiHandler, ApiHandlerCreateMessageMetadata, buildApiHandler } from "..
 import { ApiStream, type ApiStreamChunk, GroundingSource } from "../../api/transform/stream"
 import { maybeRemoveImageBlocks } from "../../api/transform/image-cleaning"
 import { getApiRequestTimeout } from "../../api/providers/utils/timeout-config"
+import { logCodexLifecycle } from "../../integrations/openai-codex/diagnostics"
 import { VirtualQuotaFallbackHandler } from "../../api/providers/virtual-quota-fallback" // kilocode_change: Import VirtualQuotaFallbackHandler for model change notifications
 
 // shared
@@ -3134,6 +3135,14 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			const currentIncludeFileDetails = currentItem.includeFileDetails
 			// A Stop during asynchronous request preparation must not be forgotten.
 			const preparationGeneration = this.requestCancellationGeneration
+			const operationId = uuidv7()
+			const logTaskPhase = (phase: string, details: { code?: string; httpStatus?: number } = {}) => {
+				if (this.apiConfiguration?.apiProvider === "openai-codex") {
+					logCodexLifecycle({ phase, operationId, taskId: this.taskId, instanceId: this.instanceId,
+						attempt: currentItem.retryAttempt ?? 0, ...details })
+				}
+			}
+			logTaskPhase("task.prepare.start")
 
 			if (this.abort) {
 				throw new Error(
@@ -3440,11 +3449,14 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				streamCancellation.abort()
 			}
 				let ownedStreamTransport: AbortController | undefined
+				let cleanupUnconfirmed = false
 				lifecyclePhase = "stream.iterator"
+				logTaskPhase("task.prepare.end")
 				const stream = this.attemptApiRequest(currentItem.retryAttempt ?? 0, {
 					skipProviderRateLimit: true,
 					cancellationGeneration: preparationGeneration,
 					signal: streamCancellation.signal,
+					operationId,
 					onTransportCreated: (controller) => { ownedStreamTransport = controller },
 				})
 				let assistantMessage = ""
@@ -3498,6 +3510,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 					lifecyclePhase = "stream.read"
 					let item = await nextChunkWithAbort()
+					logTaskPhase("task.first_chunk")
 					while (!item.done) {
 						if (this.abort || streamAbortSignal?.aborted) break
 						const chunk = item.value
@@ -3971,32 +3984,39 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							}
 						}
 
-						try {
-							// Continue processing the original stream from where the main loop left off
-							let usageFound = false
-
-							// Only the unread tail belongs to the collector. Each read is bounded even
-							// when the remote provider stalls after an early tool exit.
-							const readNextWithDeadline = async (): Promise<IteratorResult<ApiStreamChunk>> => {
-								const remaining = timeoutMs - (performance.now() - startTime)
-								if (remaining <= 0) throw new Error("Usage collection timed out")
-								let timer: ReturnType<typeof setTimeout> | undefined
-								try {
-									return await Promise.race([
-										iterator.next(),
-										new Promise<never>((_, reject) => {
-											timer = setTimeout(() => reject(new Error("Usage collection timed out")), remaining)
-										}),
-									])
-								} finally {
-									if (timer) clearTimeout(timer)
-								}
+						const readNextWithDeadline = async (): Promise<IteratorResult<ApiStreamChunk>> => {
+							const remaining = timeoutMs - (performance.now() - startTime)
+							if (remaining <= 0) throw new Error("Usage collection timed out")
+							let timer: ReturnType<typeof setTimeout> | undefined
+							let onStop: (() => void) | undefined
+							const stopped = new Promise<never>((_, reject) => {
+								onStop = () => reject(new Error("Usage collection cancelled"))
+								if (streamCancellation.signal.aborted) onStop()
+								else streamCancellation.signal.addEventListener("abort", onStop, { once: true })
+							})
+							try {
+								return await Promise.race([
+									iterator.next(),
+									stopped,
+									new Promise<never>((_, reject) => {
+										timer = setTimeout(() => reject(new Error("Usage collection timed out")), remaining)
+									}),
+								])
+							} finally {
+								if (timer) clearTimeout(timer)
+								if (onStop) streamCancellation.signal.removeEventListener("abort", onStop)
 							}
+						}
+						let usageFound = false
+						try {
+							// The main reader is finished. Only a deliberate early exit grants
+							// this collector ownership of the unread stream tail.
 							if (shouldRead) {
-								let remainingItem = await readNextWithDeadline()
-								while (!remainingItem.done && !this.abort && !streamAbortSignal?.aborted) {
-									const chunk = remainingItem.value
-																		if (chunk?.type === "usage") {
+								while (!this.abort && !streamCancellation.signal.aborted) {
+									const next = await readNextWithDeadline()
+									if (next.done) break
+									const chunk = next.value
+									if (chunk?.type === "usage") {
 										usageFound = true
 										bgInputTokens += chunk.inputTokens
 										bgOutputTokens += chunk.outputTokens
@@ -4005,92 +4025,73 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 										bgTotalCost = chunk.totalCost
 										inferenceProvider = chunk.inferenceProvider
 									}
-									remainingItem = await readNextWithDeadline()
 								}
 							}
-
-							if (
-								usageFound ||
-								bgInputTokens > 0 ||
-								bgOutputTokens > 0 ||
-								bgCacheWriteTokens > 0 ||
-								bgCacheReadTokens > 0
-							) {
-								// We have usage data either from a usage chunk or accumulated tokens
-								await captureUsageData(
-									{
-										input: bgInputTokens,
-										output: bgOutputTokens,
-										cacheWrite: bgCacheWriteTokens,
-										cacheRead: bgCacheReadTokens,
-										total: bgTotalCost,
-									},
-									lastApiReqIndex,
-								)
-							} else {
-								console.warn(
-									`[Background Usage Collection] Suspicious: request ${apiReqIndex} is complete, but no usage info was found. Model: ${modelId}`,
-								)
-								// kilocode_change start
-								usageMissing = true
-								await refreshApiReqMsg(apiReqIndex)
-								// kilocode_change end
-							}
-						} catch (error) {
-							console.error("Error draining stream for usage data:", error)
-							// Still try to capture whatever usage data we have collected so far
-							if (
-								bgInputTokens > 0 ||
-								bgOutputTokens > 0 ||
-								bgCacheWriteTokens > 0 ||
-								bgCacheReadTokens > 0
-							) {
-								await captureUsageData(
-									{
-										input: bgInputTokens,
-										output: bgOutputTokens,
-										cacheWrite: bgCacheWriteTokens,
-										cacheRead: bgCacheReadTokens,
-										total: bgTotalCost,
-									},
-									lastApiReqIndex,
-								)
-								// kilocode_change start
-							} else {
-								usageMissing = true
-								await refreshApiReqMsg(apiReqIndex)
-								// kilocode_change end
+						} catch {
+							if (!this.abort && !streamCancellation.signal.aborted) {
+								console.warn(`[Task#${this.taskId}] Usage collection ended before EOF`)
 							}
 						} finally {
-							if (shouldRead) {
-								// Never leave an old reader active when the next request starts.
-							if (this.currentRequestAbortController === ownedTransport) ownedTransport?.abort()
-							let closeTimer: ReturnType<typeof setTimeout> | undefined
-							const closed = await Promise.race([
-								iterator.return(undefined).then(() => true, () => false),
-								new Promise<boolean>((resolve) => {
-									closeTimer = setTimeout(() => resolve(false), 3000)
-								}),
-							])
-							if (closeTimer) clearTimeout(closeTimer)
-							if (!closed) throw new Error("Previous stream did not close after usage collection")
+							try {
+								if (!this.abort && !streamCancellation.signal.aborted) {
+									if (
+										usageFound || bgInputTokens > 0 || bgOutputTokens > 0 ||
+										bgCacheWriteTokens > 0 || bgCacheReadTokens > 0
+									) {
+										await captureUsageData({
+											input: bgInputTokens,
+											output: bgOutputTokens,
+											cacheWrite: bgCacheWriteTokens,
+											cacheRead: bgCacheReadTokens,
+											total: bgTotalCost,
+										}, apiReqIndex)
+									} else {
+										usageMissing = true
+										await refreshApiReqMsg(apiReqIndex)
+									}
+								}
+							} finally {
+								if (shouldRead) {
+									// The old attempt is closed before any new dispatch.
+									ownedTransport?.abort()
+									if (this.abort || streamCancellation.signal.aborted) {
+										void iterator.return(undefined).catch(() => {})
+									} else {
+										let closeTimer: ReturnType<typeof setTimeout> | undefined
+										const closed = await Promise.race([
+											iterator.return(undefined).then(() => true, () => false),
+											new Promise<boolean>((resolve) => {
+												closeTimer = setTimeout(() => resolve(false), 3000)
+											}),
+										])
+										if (closeTimer) clearTimeout(closeTimer)
+										if (!closed) {
+											cleanupUnconfirmed = true
+											throw new Error("Previous stream did not close after usage collection")
+										}
+									}
+								}
+							}
 						}
-					}
+
 					}
 
+					logTaskPhase(item.done ? "task.eof" : "task.early_exit")
 					// Normal EOF needs no extra reads; an early exit gives the collector
 					// sole ownership of the remaining iterator before any new request.
 					if (!this.abort && !streamCancellation.signal.aborted) {
 						await collectRemainingStreamUsage(lastApiReqIndex, !item.done)
 					}
 				} catch (error) {
+					logTaskPhase("task.error", { code: (error as any)?.code, httpStatus: (error as any)?.status })
+					logTaskPhase("task.cleanup.start")
 					// Close this generator before permitting any further dispatch. The
 					// transport is local to the failed attempt, not the user Stop signal.
 					ownedStreamTransport?.abort()
 					if (this.abort || streamCancellation.signal.aborted) {
 						// User Stop must not wait for a provider that ignores abort.
 						void stream.return(undefined).catch(() => {})
-					} else {
+					} else if (!cleanupUnconfirmed) {
 						let closeTimer: ReturnType<typeof setTimeout> | undefined
 						const closed = await Promise.race([
 							stream.return(undefined).then(() => true, () => false),
@@ -4100,8 +4101,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 						])
 						if (closeTimer) clearTimeout(closeTimer)
 						if (!closed) {
+							cleanupUnconfirmed = true
 							console.warn(`[Task#${this.taskId}] Stream did not close; replay refused`)
-							throw error
 						}
 					}
 					// Abandoned happens when extension is no longer waiting for the
@@ -4133,6 +4134,8 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 							console.warn(`[Task#${this.taskId}] Failed to persist stream cleanup`, (cleanupError as Error)?.name)
 							throw error // No replay when the interrupted state was not persisted.
 						}
+						logTaskPhase("task.cleanup.end")
+						if (cleanupUnconfirmed) throw error // Never dispatch with a potentially live old stream.
 						// Never replay a Codex request after an interrupted stream,
 						// including reasoning/tool fragments that were not shown as text.
 						if (this.apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest) {
@@ -4201,7 +4204,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				}
 
 				// Need to call here in case the stream was aborted.
-				if (this.abort || this.abandoned) {
+				if (this.abort || this.abandoned || streamCancellation.signal.aborted) {
 					throw new Error(
 						`[KiloCode#recursivelyMakeClineRequests] task ${this.taskId}.${this.instanceId} aborted`,
 					)
@@ -4577,6 +4580,13 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 				// If we reach here without continuing, return false (will always be false for now)
 				return false
 			} catch (error) {
+				// An explicit Stop must not be interpreted as a provider failure.
+				if (!this.abort && !this.abandoned && preparationGeneration !== this.requestCancellationGeneration) {
+					this.abortReason = "user_cancelled"
+					logTaskPhase("task.stop")
+					await this.abortTask()
+					return true
+				}
 				// The interrupted request is already persisted by the inner stream handler.
 				// Surface terminal errors instead of silently ending the Task loop.
 				if (!this.abort && !this.abandoned) {
@@ -4590,8 +4600,15 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 					try { this.providerRef.deref()?.log(diagnostic) } catch { console.warn(diagnostic) }
 					await this.say(
 						"error",
-						`Request failed (${category}${httpStatus}). Automatic replay was not attempted. Review partial output before manually continuing.`,
+						`Request failed (${category}${httpStatus}). The request may have reached the provider. Check any partial output and tool effects before explicitly resuming.`,
 					)
+					// Stop the failed Task and use the existing persisted-history resume prompt.
+					// Unlocking the text field alone would send feedback to a finished loop.
+					if (this.apiConfiguration?.apiProvider === "openai-codex" || (error as any)?.codexRequest) {
+						this.abortReason = "streaming_failed"
+						logTaskPhase("task.terminal")
+						await this.abortTask()
+					}
 				}
 				return true
 
@@ -4993,6 +5010,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			codexDeadlineAt?: number
 			cancellationGeneration?: number
 			signal?: AbortSignal
+			operationId?: string
 			onTransportCreated?: (controller: AbortController) => void
 		} = {},
 	): ApiStream {
@@ -5400,11 +5418,15 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			throw error
 		}
 		// The provider accepts reasoning items alongside standard messages; cast to the expected parameter type.
+		if (apiConfiguration?.apiProvider === "openai-codex") {
+			logCodexLifecycle({ phase: "task.dispatch", operationId: options.operationId,
+				taskId: this.taskId, instanceId: this.instanceId, attempt: retryAttempt })
+		}
 		const stream = this.api.createMessage(
 			systemPrompt,
 			cleanConversationHistory as unknown as Anthropic.Messages.MessageParam[],
 			metadata,
-			{ signal: abortSignal, deadlineAt: codexDeadlineAt },
+			{ signal: abortSignal, deadlineAt: codexDeadlineAt, operationId: options.operationId, attempt: retryAttempt },
 		)
 		const iterator = stream[Symbol.asyncIterator]()
 

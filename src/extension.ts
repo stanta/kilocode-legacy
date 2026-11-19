@@ -30,6 +30,7 @@ import { TerminalRegistry } from "./integrations/terminal/TerminalRegistry"
 import { claudeCodeOAuthManager } from "./integrations/claude-code/oauth"
 import { openAiCodexOAuthManager } from "./integrations/openai-codex/oauth"
 import { registerCodexStorageProbe } from "./integrations/openai-codex/storage-probe"
+import { setCodexDiagnosticOutput } from "./integrations/openai-codex/diagnostics"
 import { McpServerManager } from "./services/mcp/McpServerManager"
 import { CodeIndexManager } from "./services/code-index/manager"
 import { registerCommitMessageProvider } from "./services/commit-message"
@@ -102,6 +103,7 @@ let userInfoHandler: ((data: { userInfo: CloudUserInfo }) => Promise<void>) | un
 export async function activate(context: vscode.ExtensionContext) {
 	extensionContext = context
 	outputChannel = vscode.window.createOutputChannel("Kilo-Code")
+	context.subscriptions.push({ dispose: setCodexDiagnosticOutput((line) => outputChannel.appendLine(line)) })
 	context.subscriptions.push(outputChannel)
 	outputChannel.appendLine(`${Package.name} extension activated - ${JSON.stringify(Package)}`)
 

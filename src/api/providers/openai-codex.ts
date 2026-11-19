@@ -21,6 +21,7 @@ import { getApiRequestTimeout } from "./utils/timeout-config"
 import { isMcpTool } from "../../utils/mcp-name"
 import { sanitizeOpenAiCallId } from "../../utils/tool-id"
 import { openAiCodexOAuthManager } from "../../integrations/openai-codex/oauth"
+import { logCodexLifecycle } from "../../integrations/openai-codex/diagnostics"
 
 import { DEFAULT_HEADERS } from "./constants" // kilocode-change
 
@@ -213,6 +214,17 @@ export class OpenAiCodexHandler extends BaseProvider /* kilocode_change: impleme
 		this.activeDiagnosticRequests++
 		const diagnostic = (nextPhase: string, details: Record<string, number | boolean> = {}) => {
 			phase = nextPhase
+			logCodexLifecycle({
+				phase: nextPhase,
+				operationId: requestOptions?.operationId ?? requestId,
+				requestId,
+				taskId: metadata?.taskId,
+				attempt: requestOptions?.attempt,
+				elapsedMs: Date.now() - started,
+				httpStatus: typeof details.httpStatus === "number" ? details.httpStatus : undefined,
+				waiting: details.waiting === true,
+				authenticated: typeof details.authenticated === "boolean" ? details.authenticated : undefined,
+			})
 			// Do not log credentials, account identifiers, prompts, error bodies, or tool arguments.
 			try {
 				;(details.waiting ? console.debug : console.info)("[OpenAI Codex] Request diagnostic", {

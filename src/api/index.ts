@@ -147,6 +147,9 @@ export interface ApiHandlerCreateMessageMetadata {
 export interface ApiHandlerRequestOptions {
 	signal?: AbortSignal
 	deadlineAt?: number
+	/** Local diagnostic correlation, never sent to an API or saved in conversation history. */
+	operationId?: string
+	attempt?: number
 }
 
 export interface ApiHandler {

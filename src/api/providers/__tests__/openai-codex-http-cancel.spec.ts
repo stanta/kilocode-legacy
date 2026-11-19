@@ -152,6 +152,65 @@ describe("Codex real HTTP cancellation and SSE lifecycle", () => {
 		}
 	}, 15_000)
 
+	it("delivers a complete tool call and final usage exactly once over real HTTP SSE", async () => {
+		const server = createServer((_req, response) => {
+			response.writeHead(200, { "Content-Type": "text/event-stream" })
+			const frame = (event: unknown) => "data: " + JSON.stringify(event) + "\n\n"
+			response.end(
+				frame({
+					type: "response.output_item.done",
+					item: { type: "message", content: [{ type: "output_text", text: "Ready" }] },
+				}) +
+					frame({
+						type: "response.output_item.done",
+						item: {
+							type: "function_call",
+							call_id: "synthetic-call-1",
+							name: "attempt_completion",
+							arguments: '{"result":"ready"}',
+						},
+					}) +
+					frame({
+						type: "response.completed",
+						response: {
+							id: "synthetic-finished",
+							status: "completed",
+							output: [],
+							usage: { input_tokens: 11, output_tokens: 3 },
+						},
+					}),
+			)
+		})
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+		const port = (server.address() as AddressInfo).port
+		const rawFetch = globalThis.fetch.bind(globalThis)
+		vi.stubGlobal("fetch", vi.fn((_url: unknown, options?: RequestInit) =>
+			rawFetch("http://127.0.0.1:" + port + "/responses", options),
+		))
+		vi.spyOn(openAiCodexOAuthManager, "getTokenSnapshot").mockResolvedValue({ accessToken: "synthetic" })
+		const handler = new OpenAiCodexHandler({ apiModelId: "gpt-6.1-sol" })
+		;(handler as any).useManualSse = true
+		try {
+			const chunks: Array<{ type: string; [key: string]: unknown }> = []
+			for await (const chunk of handler.createMessage("synthetic", [], { taskId: "http-tool" })) {
+				chunks.push(chunk)
+			}
+			expect(chunks.filter((chunk) => chunk.type === "text")).toEqual([
+				{ type: "text", text: "Ready" },
+			])
+			expect(chunks.filter((chunk) => chunk.type === "tool_call")).toEqual([
+				{ type: "tool_call", id: "synthetic-call-1", name: "attempt_completion", arguments: '{"result":"ready"}' },
+			])
+			expect(chunks.filter((chunk) => chunk.type === "usage")).toMatchObject([
+				{ type: "usage", inputTokens: 11, outputTokens: 3 },
+			])
+			expect(handler.getResponseId()).toBe("synthetic-finished")
+		} finally {
+			server.closeAllConnections()
+			await new Promise<void>((resolve) => server.close(() => resolve()))
+		}
+	}, 15_000)
+
 	it("terminal SSE frame without trailing newline finishes instead of waiting for EOF", async () => {
 		const server = createServer((_req, response) => {
 			response.writeHead(200, { "Content-Type": "text/event-stream" })
